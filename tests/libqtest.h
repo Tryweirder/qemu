@@ -65,6 +65,8 @@ QTestState *qtest_init(const char *extra_args);
 QTestState *qtest_init_without_qmp_handshake(bool use_oob,
                                              const char *extra_args);
 
+QTestState *qtest_init_vmconnect(int qtest_fd, int qmp_fd);
+
 /**
  * qtest_quit:
  * @s: #QTestState instance to operate on.

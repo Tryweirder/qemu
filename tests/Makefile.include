@@ -407,6 +407,7 @@ check-qtest-generic-y += tests/test-hmp$(EXESUF)
 check-qtest-generic-$(CONFIG_SECCOMP) += tests/qemu-seccomp$(EXESUF)
 check-qtest-generic-$(CONFIG_BLOCK_PLUGINS) += tests/blockstore-test$(EXESUF)
 check-qtest-generic-y += tests/test-query-device-blockstats$(EXESUF)
+check-qtest-generic-y += tests/test_proxy$(EXESUF)
 
 qapi-schema += alternate-any.json
 qapi-schema += alternate-array.json
@@ -840,6 +841,7 @@ tests/numa-test$(EXESUF): tests/numa-test.o
 tests/vmgenid-test$(EXESUF): tests/vmgenid-test.o tests/boot-sector.o tests/acpi-utils.o
 tests/sdhci-test$(EXESUF): tests/sdhci-test.o $(libqos-pc-obj-y)
 tests/qemu-seccomp$(EXESUF): tests/qemu-seccomp.o
+tests/test_proxy$(EXECSUF): tests/test_proxy.o $(libqos-virtio-obj-y)
 tests/test-query-device-blockstats$(EXESUF): tests/test-query-device-blockstats.o
 
 tests/blockstore-test$(EXESUF): tests/libblockstore-mock.so tests/blockstore-test.o

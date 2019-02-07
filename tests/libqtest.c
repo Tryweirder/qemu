@@ -252,6 +252,25 @@ QTestState *qtest_init(const char *extra_args)
     return s;
 }
 
+QTestState *qtest_init_vmconnect(int qtest_fd, int qmp_fd)
+{
+    QTestState *s;
+    int i;
+
+    s = g_new(QTestState, 1);
+    s->fd = qtest_fd;
+    s->qmp_fd = qmp_fd;
+    s->rx = g_string_new("");
+    for (i = 0; i < MAX_IRQ; i++) {
+        s->irq_level[i] = false;
+    }
+
+    /* ask endianness of the target */
+    s->big_endian = qtest_query_target_endianness(s);
+
+    return s;
+}
+
 int qtest_try_negative_testing(const char *extra_args)
 {
     int qemu_pid;

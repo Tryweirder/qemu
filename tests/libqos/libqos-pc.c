@@ -30,6 +30,17 @@ QOSState *qtest_pc_boot(const char *cmdline_fmt, ...)
     return qs;
 }
 
+QOSState *qtest_pc_vmconnect(int qtest_fd, int qmp_fd)
+{
+    QOSState *qs;
+
+    qs = qtest_vmconnect(&qos_ops, qtest_fd, qmp_fd);
+
+    qtest_irq_intercept_in(qs->qts, "ioapic");
+
+    return qs;
+}
+
 void qtest_pc_shutdown(QOSState *qs)
 {
     return qtest_common_shutdown(qs);

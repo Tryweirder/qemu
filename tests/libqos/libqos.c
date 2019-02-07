@@ -32,6 +32,20 @@ QOSState *qtest_vboot(QOSOps *ops, const char *cmdline_fmt, va_list ap)
     return qs;
 }
 
+QOSState *qtest_vmconnect(QOSOps *ops, int qtest_fd, int qmp_fd)
+{
+    QOSState *qs = g_new0(QOSState, 1);
+
+    qs->qts = qtest_init_vmconnect(qtest_fd, qmp_fd);
+    qs->ops = ops;
+    if (ops) {
+        qs->alloc = ops->init_allocator(qs->qts, ALLOC_NO_FLAGS);
+        qs->pcibus = ops->qpci_init(qs->qts, qs->alloc);
+    }
+
+    return qs;
+}
+
 /**
  * Launch QEMU with the given command line,
  * and then set up interrupts and our guest malloc interface.
