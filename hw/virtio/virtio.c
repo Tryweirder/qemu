@@ -355,6 +355,16 @@ static int virtio_queue_empty_rcu(VirtQueue *vq)
     return vring_avail_idx(vq) == vq->last_avail_idx;
 }
 
+/* Check the state of the virtual queue. Need to check only the
+ * shadow_avail_idx and last_avail_idx fields. */
+int virtio_check_avail(VirtQueue *vq)
+{
+    if ((vq->shadow_avail_idx == 0) && (vq->last_avail_idx == 0)) {
+        return 0;
+    }
+    return 1;
+}
+
 int virtio_queue_empty(VirtQueue *vq)
 {
     bool empty;
@@ -449,6 +459,18 @@ bool virtqueue_rewind(VirtQueue *vq, unsigned int num)
     vq->last_avail_idx -= num;
     vq->inuse -= num;
     return true;
+}
+
+/* virtqueue_zero:
+ * @vq: The #VirtQueue
+ *
+ * Reset the virtual queue available ring state. Need for fuzzing to reset
+ * the state.
+ */
+void virtqueue_zero(VirtQueue *vq)
+{
+    vq->last_avail_idx = 0;
+    vq->shadow_avail_idx = 0;
 }
 
 /* Called within rcu_read_lock().  */
@@ -2468,12 +2490,16 @@ void GCC_FMT_ATTR(2, 3) virtio_error(VirtIODevice *vdev, const char *fmt, ...)
     error_vreport(fmt, ap);
     va_end(ap);
 
+#if !defined(AFL_FUZZING)
+    /* Mark device as broken in the default case. In case of fuzzing
+     * don't mark it as broken to continue handling packets. */
     if (virtio_vdev_has_feature(vdev, VIRTIO_F_VERSION_1)) {
         vdev->status = vdev->status | VIRTIO_CONFIG_S_NEEDS_RESET;
         virtio_notify_config(vdev);
     }
 
     vdev->broken = true;
+#endif /* !AFL_FUZZING */
 }
 
 static void virtio_memory_listener_commit(MemoryListener *listener)

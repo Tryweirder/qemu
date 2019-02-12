@@ -171,6 +171,7 @@ void virtqueue_detach_element(VirtQueue *vq, const VirtQueueElement *elem,
 void virtqueue_unpop(VirtQueue *vq, const VirtQueueElement *elem,
                      unsigned int len);
 bool virtqueue_rewind(VirtQueue *vq, unsigned int num);
+void virtqueue_zero(VirtQueue *vq);
 void virtqueue_fill(VirtQueue *vq, const VirtQueueElement *elem,
                     unsigned int len, unsigned int idx);
 
@@ -207,6 +208,7 @@ void virtio_queue_set_notification(VirtQueue *vq, int enable);
 
 int virtio_queue_ready(VirtQueue *vq);
 
+int virtio_check_avail(VirtQueue *vq);
 int virtio_queue_empty(VirtQueue *vq);
 
 /* Host binding interface.  */

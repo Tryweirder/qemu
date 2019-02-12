@@ -29,6 +29,23 @@
 #include "hw/virtio/virtio-bus.h"
 #include "hw/virtio/virtio-access.h"
 
+#if defined(AFL_FUZZING)
+static void virtio_afl_loop_breaker(VirtQueue *vq)
+{
+    /* There is an empty pop in qemu for the virtual queue. Check
+     * if this is the case and do nothing. Don't signal anything to
+     * AFL. */
+    if (!virtio_check_avail(vq)) {
+        return;
+    }
+
+    if (!__AFL_LOOP(1000)) {
+        exit(0);
+    }
+    virtqueue_zero(vq);
+}
+#endif /* AFL_FUZZING */
+
 static void virtio_blk_init_request(VirtIOBlock *s, VirtQueue *vq,
                                     VirtIOBlockReq *req)
 {
@@ -59,6 +76,9 @@ static void virtio_blk_req_complete(VirtIOBlockReq *req, unsigned char status)
     } else {
         virtio_notify(vdev, req->vq);
     }
+#if defined(AFL_FUZZING)
+    virtio_afl_loop_breaker(req->vq);
+#endif /* AFL_FUZZING */
 }
 
 static int virtio_blk_handle_rw_error(VirtIOBlockReq *req, int error,
@@ -611,13 +631,34 @@ bool virtio_blk_handle_vq(VirtIOBlock *s, VirtQueue *vq)
                 virtio_blk_free_request(req);
                 break;
             }
+
+#if defined(AFL_FUZZING)
+            /* This is required only for fuzzing. Add loop breaks,
+             * in case of error request.
+             */
+            break;
+#endif /* AFL_FUZZING */
         }
+
+#if defined(AFL_FUZZING)
+        /* This is required only for fuzzing. Add loop breaks,
+         * in case of error request.
+         */
+        break;
+#endif /* AFL_FUZZING */
 
         virtio_queue_set_notification(vq, 1);
     } while (!virtio_queue_empty(vq));
 
     if (mrb.num_reqs) {
         virtio_blk_submit_multireq(s->blk, &mrb);
+    } else {
+#if defined(AFL_FUZZING)
+        /* No new request is got (wrong descriptor or some other format error, we
+         * should notify afl about such cases, so not to hang.
+         */
+        virtio_afl_loop_breaker(vq);
+#endif /* AFL_FUZZING */
     }
 
     blk_io_unplug(s->blk);
