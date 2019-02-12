@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 #include <pthread.h>
 #include <errno.h>
+#include <sys/epoll.h>
 #include "qemu/osdep.h"
 #include "libqtest.h"
 #include "libqos/libqos-pc.h"
@@ -102,7 +103,7 @@ parse_arguments(int argc, char *argv[])
         return EINVAL;
     }
     if (strlen(g_test_proxy_opt.file_name) && strlen(g_test_proxy_opt.afl_sock_path)) {
-        printf("Use only one option explicitely: -a or -q.\n");
+        printf("Use only one option explicitely: -a or -t.\n");
         return EINVAL;
     }
     if (strlen(g_test_proxy_opt.file_name)) {
@@ -749,64 +750,166 @@ close_file:
     return ret;
 }
 
+static void
+buf_dump(const char *buf, int len)
+{
+    int i;
+
+    for (i = 0; i < len; i++) {
+        if (!(i % 16)) {
+            printf("\n");
+        }
+        printf("%02x ", buf[i]);
+    }
+    printf("\n");
+}
+
+#define MAX_EVENTS 1
+#define AFL_BUF_LEN 65536
+static char g_afl_buf[AFL_BUF_LEN];
+
+static int
+handle_io(int qtest_srv, int afl_fd, struct test_proxy_opt_s *opt)
+{
+    int qtest_fd;
+    int epoll_fd;
+    struct epoll_event ev;
+    struct epoll_event events[MAX_EVENTS];
+    int i;
+    int len;
+    int nfds;
+    struct qtest_vqdev_s qtest_vqdev;
+
+    qtest_fd = -1;
+
+    epoll_fd = epoll_create1(0);
+    if (epoll_fd == -1) {
+        printf("Can't create epoll fd: %d, %s\n",
+                errno, strerror(errno));
+        return errno;
+    }
+
+    ev.events = EPOLLIN;
+    ev.data.fd = qtest_srv;
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, qtest_srv, &ev) == -1) {
+        printf("Can't add qtest_srv = %d file descriptor to epoll_fd = %d: %d, %s\n",
+                qtest_srv, epoll_fd, errno, strerror(errno));
+        return errno;
+    }
+    if (afl_fd != -1) {
+        ev.events = EPOLLIN;
+        ev.data.fd = qtest_srv;
+        if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, afl_fd, &ev) == -1) {
+            printf("Can't add afl_fd = %d file descriptor to epoll_fd = %d: %d, %s\n",
+                    afl_fd, epoll_fd, errno, strerror(errno));
+            return errno;
+        }
+    }
+
+    while (1) {
+        nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
+        if (nfds == -1) {
+            printf("Poll error on epoll_fd = %d: %d, %s.\n",
+                    epoll_fd, errno, strerror(errno));
+            return errno;
+        }
+
+        for (i = 0; i < nfds; i++) {
+            if (events[i].data.fd == qtest_srv) {
+                if (qtest_fd != -1) {
+                    printf("Connection in use.\n");
+                    continue;
+                }
+
+                /* New connection. */
+                qtest_fd = accept(qtest_srv, NULL, NULL);
+                if (qtest_fd == -1) {
+                    printf("Can't accept qtest connection: %d, %s.\n",
+                            errno, strerror(errno));
+                    return errno;
+                }
+
+                memset(&qtest_vqdev, 0, sizeof(qtest_vqdev));
+                qos_state_init(&qtest_vqdev, qtest_fd, -1);
+                show_vq_ptrs(&qtest_vqdev);
+
+                if (opt->mode == PROXY_MODE_FILE) {
+                    virtio_send_file(opt->file_name, &qtest_vqdev);
+                    qos_state_cleanup(&qtest_vqdev);
+                    return 0;
+                }
+
+                ev.events = EPOLLIN | EPOLLERR | EPOLLHUP | EPOLLRDHUP;
+                ev.data.fd = qtest_fd;
+                if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, qtest_fd, &ev) == -1) {
+                    printf("Can't add qtest_fd = %d file descriptor to epoll_fd = %d: %d, %s\n",
+                            qtest_fd, epoll_fd, errno, strerror(errno));
+                    return errno;
+                }
+            } else if (events[i].data.fd == afl_fd) {
+                len = recv_unix_sock(events[i].data.fd, g_afl_buf, AFL_BUF_LEN);
+                if (len < 0) {
+                    return len;
+                }
+                printf("Get data from AFL, len = %d.\n", len);
+                buf_dump(g_afl_buf, len);
+            } else if (events[i].data.fd == qtest_fd) {
+                if ((events[i].events & EPOLLERR) ||
+                        (events[i].events & (EPOLLHUP | EPOLLRDHUP))) {
+                    /* Close qtest connection. */
+                    qos_state_cleanup(&qtest_vqdev);
+                    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, qtest_fd, NULL);
+                    close(qtest_fd);
+                    qtest_fd = -1;
+                } else if (events[i].events == EPOLLIN) {
+                    /* There is some data to read, but we don't care for now. */
+                }
+            }
+        }
+    }
+
+    return 0;
+}
+
 int
 main(int argc, char *argv[])
 {
     int ret;
-    /*int afl_srv;
-    int afl_fd;*/
+    int afl_srv;
+    int afl_fd;
     int qtest_srv;
-    int qtest_fd;
-    struct qtest_vqdev_s qtest_vqdev;
 
     ret = parse_arguments(argc, argv);
     if (ret) {
         return ret;
     }
 
-    /*afl_srv = unix_sock_create(g_test_proxy_opt.afl_sock_path);
-    if (afl_srv == -1) {
-        return -1;
+    afl_fd = -1;
+    if (g_test_proxy_opt.mode == PROXY_MODE_AFL) {
+        afl_srv = unix_sock_create(g_test_proxy_opt.afl_sock_path);
+        if (afl_srv == -1) {
+            return -1;
+        }
+        printf("Waiting for the connection on %s unix socket.\n", g_test_proxy_opt.afl_sock_path);
+        afl_fd = accept(afl_srv, NULL, NULL);
+        if (afl_fd == -1) {
+            printf("Can't accept connection.\n");
+            return -1;
+        }
     }
-    printf("Waiting for the connection on %s unix socket.\n", g_test_proxy_opt.afl_sock_path);
-    afl_fd = accept(afl_srv, NULL, NULL);
-    if (afl_fd == -1) {
-        printf("Can't accept connection.\n");
-        return -1;
-    }
-    printf("Connection successful.\n");*/
+    printf("Connection successful.\n");
+
     qtest_srv = unix_sock_create(g_test_proxy_opt.qtest_sock_path);
     if (qtest_srv == -1) {
         return -1;
     }
-    printf("Waiting for the connection on %s unix socket.\n",
-            g_test_proxy_opt.qtest_sock_path);
 
-    qtest_fd = accept(qtest_srv, NULL, NULL);
-    if (qtest_fd == -1) {
-        printf("Can't accept qtest connection.\n");
-        return -1;
-    }
-    printf("QTEST connection successful.\n");
-
-    memset(&qtest_vqdev, 0, sizeof(qtest_vqdev));
-    qos_state_init(&qtest_vqdev, qtest_fd, -1);
-    show_vq_ptrs(&qtest_vqdev);
-
-    switch (g_test_proxy_opt.mode) {
-    case PROXY_MODE_FILE:
-        virtio_send_file(g_test_proxy_opt.file_name, &qtest_vqdev);
-        break;
-    case PROXY_MODE_AFL:
-        break;
-    default:
-        break;
-    }
-    qos_state_cleanup(&qtest_vqdev);
+    handle_io(qtest_srv, afl_fd, &g_test_proxy_opt);
 
     return 0;
-    send_vq_request(&qtest_vqdev);
-    do_interactive(qtest_fd);
+
+    send_vq_request(NULL);
+    do_interactive(-1);
     /*printf("Start proxy\n");
     do_proxy(afl_fd, user_fd);*/
 
