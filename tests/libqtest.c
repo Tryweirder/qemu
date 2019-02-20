@@ -339,6 +339,12 @@ void qtest_quit(QTestState *s)
     g_free(s);
 }
 
+void qtest_vmremote_quit(QTestState *s)
+{
+    g_string_free(s->rx, true);
+    g_free(s);
+}
+
 static void socket_send(int fd, const char *buf, size_t size)
 {
     size_t offset;

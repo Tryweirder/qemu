@@ -76,6 +76,14 @@ QTestState *qtest_init_vmconnect(int qtest_fd, int qmp_fd);
 void qtest_quit(QTestState *s);
 
 /**
+ * qtest_vmremote_quit:
+ * @s: #QTestState instance to operate on.
+ *
+ * Free resources allocated for the "remote" virtual machine.
+ */
+void qtest_vmremote_quit(QTestState *s);
+
+/**
  * qtest_try_negative_testing
  * @extra_args: other arguments to pass to QEMU.
  *

@@ -90,6 +90,22 @@ void qtest_shutdown(QOSState *qs)
     }
 }
 
+void qtest_vmremote_shutdown(QOSState *qs)
+{
+    if (qs->ops) {
+        if (qs->pcibus && qs->ops->qpci_free) {
+            qs->ops->qpci_free(qs->pcibus);
+            qs->pcibus = NULL;
+        }
+        if (qs->alloc && qs->ops->uninit_allocator) {
+            qs->ops->uninit_allocator(qs->alloc);
+            qs->alloc = NULL;
+        }
+    }
+    qtest_vmremote_quit(qs->qts);
+    g_free(qs);
+}
+
 void set_context(QOSState *s)
 {
     global_qtest = s->qts;

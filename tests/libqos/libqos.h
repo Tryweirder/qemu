@@ -26,6 +26,7 @@ QOSState *qtest_vboot(QOSOps *ops, const char *cmdline_fmt, va_list ap);
 QOSState *qtest_boot(QOSOps *ops, const char *cmdline_fmt, ...);
 QOSState *qtest_vmconnect(QOSOps *ops, int qtest_fd, int qmp_fd);
 void qtest_common_shutdown(QOSState *qs);
+void qtest_vmremote_shutdown(QOSState *qs);
 void qtest_shutdown(QOSState *qs);
 bool have_qemu_img(void);
 void mkimg(const char *file, const char *fmt, unsigned size_mb);
