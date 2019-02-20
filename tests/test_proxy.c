@@ -33,7 +33,6 @@
 #include "standard-headers/linux/virtio_blk.h"
 #include "standard-headers/linux/virtio_pci.h"
 
-#define TEST_IMAGE_SIZE         (64 * 1024 * 1024)
 #define QVIRTIO_BLK_TIMEOUT_US  (30 * 1000 * 1000)
 #define PCI_SLOT_HP             0x06
 #define PCI_SLOT                0x04
@@ -41,6 +40,15 @@
 
 #define FILENAME_PATH_MAX 128
 #define BUFLEN 256
+
+/* Max event number to poll. */
+#define MAX_EVENTS 1
+/* AFL testcase length. Even 64k is too much, the recommended length for
+ * fuzzing is less then 4k. We are trying to use the testcases which are
+ * between 64 and 256 bytes! Use a big buffer just in case the fuzzer trying
+ * some stress testing.
+ */
+#define AFL_BUF_LEN 65536
 
 typedef struct QVirtioBlkReq {
     uint32_t type;
@@ -70,6 +78,9 @@ enum {
     PROXY_MODE_AFL,
     PROXY_MODE_MAX
 };
+
+static char g_afl_buf[AFL_BUF_LEN];
+static int g_qtest_sigpipe;
 
 static int
 parse_arguments(int argc, char *argv[])
@@ -184,86 +195,6 @@ unix_sock_create(const char *path)
     return fd;
 }
 
-/*static int
-unix_sock_connect(const char *path)
-{
-    int fd;
-    struct sockaddr_un addr;
-
-    fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0) {
-        printf("Can't create AF_UNIX socket.\n");
-        return -1;
-    }
-
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
-    if (connect(fd, (struct sockaddr *)&addr,
-                sizeof(addr)) == -1) {
-        printf("Can't connect to socket = %s.\n", path);
-        return -1;
-    }
-
-    return fd;
-}*/
-
-/*static void
-do_proxy(int afl_fd, int user_fd)
-{
-	struct msghdr msgh;
-	char control[CMSG_SPACE(sizeof(int) * 8)];
-	strut iovec iov;
-	char buf[256];
-	int len;
-
-	while (1) {
-		iov.iov_base = buf;
-		iov.iov_len = sizeof(buf);
-		msgh.msg_name = NULL;
-		msgh.msg_namelen = 0;
-		msgh.msg_iov = &iov;
-		msgh.msg_iovlen = 1;
-		msgh.msg_control = control;
-		msgh.msg_controllen = CMSG_SPACE(sizeof(int) * 8);
-		len = recvmsg(afl_fd, &msgh, 0);
-		if (len < 0) {
-			printf("Can't receive message.\n");
-			break;
-		}
-
-		iov.iov_len = len;
-		if (sendmsg(user_fd, &msgh, 0) < 0) {
-			printf("Can't send message.\n");
-			break;
-		}
-	}
-}*/
-
-static int
-send_unix_sock(int qtest_fd, char *buf, int len)
-{
-    struct msghdr msgh;
-	struct iovec iov;
-    int ret;
-
-    iov.iov_base = buf;
-    iov.iov_len = len;
-    msgh.msg_name = NULL;
-    msgh.msg_namelen = 0;
-    msgh.msg_iov = &iov;
-    msgh.msg_iovlen = 1;
-    msgh.msg_control = NULL;
-    msgh.msg_controllen = 0;
-    ret = sendmsg(qtest_fd, &msgh, 0);
-    if (ret < 0) {
-        printf("Can't send message: %d: %s.\n", errno, strerror(errno));
-        return ret;
-    }
-
-    return ret;
-}
-
 static int
 recv_unix_sock(int qtest_fd, char *buf, int len)
 {
@@ -290,41 +221,19 @@ recv_unix_sock(int qtest_fd, char *buf, int len)
 }
 
 static void
-do_interactive(int qtest_fd)
+cleanup_unix_sock(int fd)
 {
-    char buf[BUFLEN];
+    char buf[256];
     int len;
-    int ret;
 
-    buf[0] = 0;
-    buf[BUFLEN - 1] = 0;
-    while (1) {
-        printf("qtest cmd> ");
-        fflush(stdout);
-        len = read(STDIN_FILENO, buf, BUFLEN);
-        if (len >= BUFLEN) {
-            printf("The command is too long len = %d, enter another command. The size of the command should be less than %d.\n",
-                    len, BUFLEN);
-            continue;
-        }
-
-        ret = send_unix_sock(qtest_fd, buf, len);
-        if (ret != len) {
-            break;
-        }
-        ret = recv_unix_sock(qtest_fd, buf, BUFLEN);
-        if (ret < 0) {
-            break;
-        }
-        if (ret == BUFLEN) {
-            ret--;
-        }
-        buf[ret] = 0;
-        printf("%s", buf);
+    len = 256;
+    while (recv_unix_sock(fd, buf, len) == len) {
+        ;
     }
 }
 
-static QVirtioPCIDevice *virtio_blk_pci_init(QPCIBus *bus, int slot)
+static QVirtioPCIDevice *
+virtio_blk_pci_init(QPCIBus *bus, int slot)
 {
     QVirtioPCIDevice *dev;
 
@@ -341,7 +250,8 @@ static QVirtioPCIDevice *virtio_blk_pci_init(QPCIBus *bus, int slot)
     return dev;
 }
 
-static inline void virtio_blk_fix_request(QVirtioDevice *d, QVirtioBlkReq *req)
+static inline void
+virtio_blk_fix_request(QVirtioDevice *d, QVirtioBlkReq *req)
 {
 #ifdef HOST_WORDS_BIGENDIAN
     const bool host_is_big_endian = true;
@@ -356,31 +266,12 @@ static inline void virtio_blk_fix_request(QVirtioDevice *d, QVirtioBlkReq *req)
     }
 }
 
-static uint64_t virtio_blk_request(QGuestAllocator *alloc, QVirtioDevice *d,
-                                   QVirtioBlkReq *req, uint64_t data_size)
-{
-    uint64_t addr;
-    uint8_t status = 0xFF;
-
-    g_assert_cmpuint(data_size % 512, ==, 0);
-    addr = guest_alloc(alloc, sizeof(*req) + data_size);
-
-    virtio_blk_fix_request(d, req);
-
-    memwrite(addr, req, 16);
-    memwrite(addr + 16, req->data, data_size);
-    memwrite(addr + 16 + data_size, &status, sizeof(status));
-
-    return addr;
-}
-
 static void
 qos_state_init(struct qtest_vqdev_s *qvq, int qtest_fd, int qmp_fd)
 {
     QOSState *qs;
     QVirtioPCIDevice *dev;
     QVirtQueuePCI *vqpci;
-    uint64_t capacity;
     uint32_t features;
 
     qs = qtest_pc_vmconnect(qtest_fd, qmp_fd);//(NULL, NULL, PCI_SLOT, PCI_FN, "");
@@ -390,9 +281,6 @@ qos_state_init(struct qtest_vqdev_s *qvq, int qtest_fd, int qmp_fd)
     qpci_msix_enable(dev->pdev);
 
     qvirtio_pci_set_msix_configuration_vector(dev, qs->alloc, 0);
-
-    capacity = qvirtio_config_readq(&dev->vdev, 0);
-    g_assert_cmpint(capacity, ==, TEST_IMAGE_SIZE / 512);
 
     features = qvirtio_get_features(&dev->vdev);
     features = features & ~(QVIRTIO_F_BAD_FEATURE |
@@ -423,7 +311,9 @@ qos_state_cleanup(struct qtest_vqdev_s *qvq)
     vqpci = qvq->vqpci;
 
     qvirtqueue_cleanup(dev->vdev.bus, &vqpci->vq, qs->alloc);
-    qpci_msix_disable(dev->pdev);
+    /* No fd to write because qemu process is already closed, as a
+     * result there is no need to call qpci_msix_disable(). No free
+     * is made inside this routine, so its not the problem. */
     qvirtio_pci_device_disable(dev);
     qvirtio_pci_device_free(dev);
     global_qtest = NULL;
@@ -438,263 +328,23 @@ send_vq_data(struct qtest_vqdev_s *qvq, char *buf, int len)
     QVirtioPCIDevice *dev;
     QVirtQueuePCI *vqpci;
     QVirtQueue *vq;
-    uint16_t idx;
 
     dev = qvq->dev;
     vqpci = qvq->vqpci;
 
     vq = &vqpci->vq;
     memwrite(vq->desc, buf, len);
-    /* vq->avail->idx */
-    idx = readw(vq->avail + 2);
-    printf("idx = %d\n", idx);
-    /* vq->avail->ring[idx % vq->size] */
-    writew(vq->avail + 4 + (2 * (idx % vq->size)), 0);
-    /* vq->avail->idx */
-    writew(vq->avail + 2, idx + 1);
+    /* Always set available ring to the default state. In general
+     * the big testcase buffer can overwrite the available ring memory.
+     * That is why we need to set it in the proper state, so both proxy
+     * and qemu work correctly with the buffer.
+     */
+    writew(vq->avail + 4, 0);
+    writew(vq->avail + 2, 1);
 
     /* kick */
     dev->vdev.bus->virtqueue_kick(&dev->vdev, vq);
 }
-
-static void
-show_vq_ptrs(struct qtest_vqdev_s *qvq)
-{
-    QVirtQueue *vq;
-
-    vq = &qvq->vqpci->vq;
-    printf("vq->desc = %lx\n", vq->desc);
-    printf("vq->avail = %lx\n", vq->avail);
-    printf("vq->used = %lx\n", vq->used);
-    printf("vq->size = %u\n", vq->size);
-}
-
-static void
-send_vq_request(struct qtest_vqdev_s *qvq)
-{
-    QOSState *qs;
-    QVirtioPCIDevice *dev;
-    QVirtQueuePCI *vqpci;
-    QVirtioBlkReq req;
-    uint64_t req_addr;
-    uint32_t free_head;
-    uint32_t write_head;
-    uint32_t desc_idx;
-    uint8_t status;
-    char *data;
-
-    qs = qvq->qs;
-    dev = qvq->dev;
-    vqpci = qvq->vqpci;
-
-    /* Write request */
-    req.type = VIRTIO_BLK_T_OUT;
-    req.ioprio = 1;
-    req.sector = 0;
-    req.data = g_malloc0(512);
-    strcpy(req.data, "TEST");
-
-    req_addr = virtio_blk_request(qs->alloc, &dev->vdev, &req, 512);
-
-    g_free(req.data);
-
-    free_head = qvirtqueue_add(&vqpci->vq, req_addr, 16, false, true);
-    qvirtqueue_add(&vqpci->vq, req_addr + 16, 512, false, true);
-    qvirtqueue_add(&vqpci->vq, req_addr + 528, 1, true, false);
-    qvirtqueue_kick(&dev->vdev, &vqpci->vq, free_head);
-
-    qvirtio_wait_used_elem(&dev->vdev, &vqpci->vq, free_head, NULL,
-                           QVIRTIO_BLK_TIMEOUT_US);
-
-    /* Write request */
-    req.type = VIRTIO_BLK_T_OUT;
-    req.ioprio = 1;
-    req.sector = 1;
-    req.data = g_malloc0(512);
-    strcpy(req.data, "TEST");
-
-    req_addr = virtio_blk_request(qs->alloc, &dev->vdev, &req, 512);
-
-    g_free(req.data);
-
-    /* Notify after processing the third request */
-    qvirtqueue_set_used_event(&vqpci->vq, 2);
-    free_head = qvirtqueue_add(&vqpci->vq, req_addr, 16, false, true);
-    qvirtqueue_add(&vqpci->vq, req_addr + 16, 512, false, true);
-    qvirtqueue_add(&vqpci->vq, req_addr + 528, 1, true, false);
-    qvirtqueue_kick(&dev->vdev, &vqpci->vq, free_head);
-    write_head = free_head;
-
-    /* No notification expected */
-    status = qvirtio_wait_status_byte_no_isr(&dev->vdev,
-                                             &vqpci->vq, req_addr + 528,
-                                             QVIRTIO_BLK_TIMEOUT_US);
-    g_assert_cmpint(status, ==, 0);
-
-    guest_free(qs->alloc, req_addr);
-
-    /* Read request */
-    req.type = VIRTIO_BLK_T_IN;
-    req.ioprio = 1;
-    req.sector = 1;
-    req.data = g_malloc0(512);
-
-    req_addr = virtio_blk_request(qs->alloc, &dev->vdev, &req, 512);
-
-    g_free(req.data);
-
-    free_head = qvirtqueue_add(&vqpci->vq, req_addr, 16, false, true);
-    qvirtqueue_add(&vqpci->vq, req_addr + 16, 512, true, true);
-    qvirtqueue_add(&vqpci->vq, req_addr + 528, 1, true, false);
-
-    qvirtqueue_kick(&dev->vdev, &vqpci->vq, free_head);
-
-    /* We get just one notification for both requests */
-    qvirtio_wait_used_elem(&dev->vdev, &vqpci->vq, write_head, NULL,
-                           QVIRTIO_BLK_TIMEOUT_US);
-    g_assert(qvirtqueue_get_buf(&vqpci->vq, &desc_idx, NULL));
-    g_assert_cmpint(desc_idx, ==, free_head);
-
-    status = readb(req_addr + 528);
-    g_assert_cmpint(status, ==, 0);
-
-    data = g_malloc0(512);
-    memread(req_addr + 16, data, 512);
-    g_assert_cmpstr(data, ==, "TEST");
-    g_free(data);
-
-    guest_free(qs->alloc, req_addr);
-}
-
-#if 0
-static void
-qos_state_init(int qtest_fd, int qmp_fd)
-{
-    QOSState *qs;
-    QVirtioPCIDevice *dev;
-    QVirtQueuePCI *vqpci;
-    QVirtioBlkReq req;
-    uint64_t req_addr;
-    uint64_t capacity;
-    uint32_t features;
-    uint32_t free_head;
-    uint32_t write_head;
-    uint32_t desc_idx;
-    uint8_t status;
-    char *data;
-
-    qs = qtest_pc_vmconnect(qtest_fd, qmp_fd);//(NULL, NULL, PCI_SLOT, PCI_FN, "");
-    global_qtest = qs->qts;
-
-    dev = virtio_blk_pci_init(qs->pcibus, PCI_SLOT);
-    qpci_msix_enable(dev->pdev);
-
-    qvirtio_pci_set_msix_configuration_vector(dev, qs->alloc, 0);
-
-    capacity = qvirtio_config_readq(&dev->vdev, 0);
-    g_assert_cmpint(capacity, ==, TEST_IMAGE_SIZE / 512);
-
-    features = qvirtio_get_features(&dev->vdev);
-    features = features & ~(QVIRTIO_F_BAD_FEATURE |
-                            (1u << VIRTIO_RING_F_INDIRECT_DESC) |
-                            (1u << VIRTIO_F_NOTIFY_ON_EMPTY) |
-                            (1u << VIRTIO_BLK_F_SCSI));
-    qvirtio_set_features(&dev->vdev, features);
-
-    vqpci = (QVirtQueuePCI *)qvirtqueue_setup(&dev->vdev, qs->alloc, 0);
-    qvirtqueue_pci_msix_setup(dev, vqpci, qs->alloc, 1);
-
-    qvirtio_set_driver_ok(&dev->vdev);
-
-    /* Write request */
-    req.type = VIRTIO_BLK_T_OUT;
-    req.ioprio = 1;
-    req.sector = 0;
-    req.data = g_malloc0(512);
-    strcpy(req.data, "TEST");
-
-    req_addr = virtio_blk_request(qs->alloc, &dev->vdev, &req, 512);
-
-    g_free(req.data);
-
-    free_head = qvirtqueue_add(&vqpci->vq, req_addr, 16, false, true);
-    qvirtqueue_add(&vqpci->vq, req_addr + 16, 512, false, true);
-    qvirtqueue_add(&vqpci->vq, req_addr + 528, 1, true, false);
-    qvirtqueue_kick(&dev->vdev, &vqpci->vq, free_head);
-
-    qvirtio_wait_used_elem(&dev->vdev, &vqpci->vq, free_head, NULL,
-                           QVIRTIO_BLK_TIMEOUT_US);
-
-    /* Write request */
-    req.type = VIRTIO_BLK_T_OUT;
-    req.ioprio = 1;
-    req.sector = 1;
-    req.data = g_malloc0(512);
-    strcpy(req.data, "TEST");
-
-    req_addr = virtio_blk_request(qs->alloc, &dev->vdev, &req, 512);
-
-    g_free(req.data);
-
-    /* Notify after processing the third request */
-    qvirtqueue_set_used_event(&vqpci->vq, 2);
-    free_head = qvirtqueue_add(&vqpci->vq, req_addr, 16, false, true);
-    qvirtqueue_add(&vqpci->vq, req_addr + 16, 512, false, true);
-    qvirtqueue_add(&vqpci->vq, req_addr + 528, 1, true, false);
-    qvirtqueue_kick(&dev->vdev, &vqpci->vq, free_head);
-    write_head = free_head;
-
-    /* No notification expected */
-    status = qvirtio_wait_status_byte_no_isr(&dev->vdev,
-                                             &vqpci->vq, req_addr + 528,
-                                             QVIRTIO_BLK_TIMEOUT_US);
-    g_assert_cmpint(status, ==, 0);
-
-    guest_free(qs->alloc, req_addr);
-
-    /* Read request */
-    req.type = VIRTIO_BLK_T_IN;
-    req.ioprio = 1;
-    req.sector = 1;
-    req.data = g_malloc0(512);
-
-    req_addr = virtio_blk_request(qs->alloc, &dev->vdev, &req, 512);
-
-    g_free(req.data);
-
-    free_head = qvirtqueue_add(&vqpci->vq, req_addr, 16, false, true);
-    qvirtqueue_add(&vqpci->vq, req_addr + 16, 512, true, true);
-    qvirtqueue_add(&vqpci->vq, req_addr + 528, 1, true, false);
-
-    qvirtqueue_kick(&dev->vdev, &vqpci->vq, free_head);
-
-    /* We get just one notification for both requests */
-    qvirtio_wait_used_elem(&dev->vdev, &vqpci->vq, write_head, NULL,
-                           QVIRTIO_BLK_TIMEOUT_US);
-    g_assert(qvirtqueue_get_buf(&vqpci->vq, &desc_idx, NULL));
-    g_assert_cmpint(desc_idx, ==, free_head);
-
-    status = readb(req_addr + 528);
-    g_assert_cmpint(status, ==, 0);
-
-    data = g_malloc0(512);
-    memread(req_addr + 16, data, 512);
-    g_assert_cmpstr(data, ==, "TEST");
-    g_free(data);
-
-    guest_free(qs->alloc, req_addr);
-
-    /* End test */
-    qvirtqueue_cleanup(dev->vdev.bus, &vqpci->vq, qs->alloc);
-    qpci_msix_disable(dev->pdev);
-    qvirtio_pci_device_disable(dev);
-    qvirtio_pci_device_free(dev);
-    global_qtest = NULL;
-    /* Shutdown/free for qs and its fields, can't use qtest_shutdown()
-     * because of there is no qemu pid.
-     */
-}
-#endif
 
 static int
 virtio_send_file(const char *file_name, struct qtest_vqdev_s *qvq)
@@ -750,24 +400,6 @@ close_file:
     return ret;
 }
 
-static void
-buf_dump(const char *buf, int len)
-{
-    int i;
-
-    for (i = 0; i < len; i++) {
-        if (!(i % 16)) {
-            printf("\n");
-        }
-        printf("%02x ", buf[i]);
-    }
-    printf("\n");
-}
-
-#define MAX_EVENTS 1
-#define AFL_BUF_LEN 65536
-static char g_afl_buf[AFL_BUF_LEN];
-
 static int
 handle_io(int qtest_srv, int afl_fd, struct test_proxy_opt_s *opt)
 {
@@ -796,15 +428,6 @@ handle_io(int qtest_srv, int afl_fd, struct test_proxy_opt_s *opt)
                 qtest_srv, epoll_fd, errno, strerror(errno));
         return errno;
     }
-    if (afl_fd != -1) {
-        ev.events = EPOLLIN;
-        ev.data.fd = qtest_srv;
-        if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, afl_fd, &ev) == -1) {
-            printf("Can't add afl_fd = %d file descriptor to epoll_fd = %d: %d, %s\n",
-                    afl_fd, epoll_fd, errno, strerror(errno));
-            return errno;
-        }
-    }
 
     while (1) {
         nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
@@ -817,7 +440,6 @@ handle_io(int qtest_srv, int afl_fd, struct test_proxy_opt_s *opt)
         for (i = 0; i < nfds; i++) {
             if (events[i].data.fd == qtest_srv) {
                 if (qtest_fd != -1) {
-                    printf("Connection in use.\n");
                     continue;
                 }
 
@@ -831,7 +453,6 @@ handle_io(int qtest_srv, int afl_fd, struct test_proxy_opt_s *opt)
 
                 memset(&qtest_vqdev, 0, sizeof(qtest_vqdev));
                 qos_state_init(&qtest_vqdev, qtest_fd, -1);
-                show_vq_ptrs(&qtest_vqdev);
 
                 if (opt->mode == PROXY_MODE_FILE) {
                     virtio_send_file(opt->file_name, &qtest_vqdev);
@@ -846,19 +467,41 @@ handle_io(int qtest_srv, int afl_fd, struct test_proxy_opt_s *opt)
                             qtest_fd, epoll_fd, errno, strerror(errno));
                     return errno;
                 }
+
+                if (afl_fd != -1) {
+                    ev.events = EPOLLIN;
+                    ev.data.fd = afl_fd;
+                    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, afl_fd, &ev) == -1) {
+                        printf("Can't add afl_fd = %d file descriptor to epoll_fd = %d: %d, %s\n",
+                                afl_fd, epoll_fd, errno, strerror(errno));
+                        return errno;
+                    }
+                }
             } else if (events[i].data.fd == afl_fd) {
                 len = recv_unix_sock(events[i].data.fd, g_afl_buf, AFL_BUF_LEN);
+                if (len == AFL_BUF_LEN) {
+                    cleanup_unix_sock(events[i].data.fd);
+                }
                 if (len < 0) {
                     return len;
                 }
-                printf("Get data from AFL, len = %d.\n", len);
-                buf_dump(g_afl_buf, len);
+                if (qtest_fd != -1) {
+                    send_vq_data(&qtest_vqdev, g_afl_buf, len);
+                }
+                if (g_qtest_sigpipe) {
+                    g_qtest_sigpipe = 0;
+                    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, afl_fd, NULL);
+                }
             } else if (events[i].data.fd == qtest_fd) {
                 if ((events[i].events & EPOLLERR) ||
                         (events[i].events & (EPOLLHUP | EPOLLRDHUP))) {
+                    if (qtest_fd == -1) {
+                        continue;
+                    }
                     /* Close qtest connection. */
                     qos_state_cleanup(&qtest_vqdev);
                     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, qtest_fd, NULL);
+                    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, afl_fd, NULL);
                     close(qtest_fd);
                     qtest_fd = -1;
                 } else if (events[i].events == EPOLLIN) {
@@ -871,6 +514,15 @@ handle_io(int qtest_srv, int afl_fd, struct test_proxy_opt_s *opt)
     return 0;
 }
 
+/* Need to handle the SIGPIPE signal because the qtest unix socket connection
+ * with qemu can be terminated anytime. If SIGPIPE isn't handled, then the proxy
+ * application will be killed by the received SIGPIPE signal. */
+static void
+handle_sigpipe(int sig)
+{
+    g_qtest_sigpipe = 1;
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -878,6 +530,7 @@ main(int argc, char *argv[])
     int afl_srv;
     int afl_fd;
     int qtest_srv;
+    int flags;
 
     ret = parse_arguments(argc, argv);
     if (ret) {
@@ -896,6 +549,20 @@ main(int argc, char *argv[])
             printf("Can't accept connection.\n");
             return -1;
         }
+
+        /* For the communication with AFL mark the socket as non-block.
+         * It can be important, if too big testcase size was sent from
+         * AFL (> 64k bytes). In this case the AFL buffer should be clear,
+         * the nonblock operations will be used. */
+        flags = fcntl(afl_fd, F_GETFL, 0);
+        if (flags < 0) {
+            printf("Can't F_GETFL: %d, %s.\n", errno, strerror(errno));
+            return -1;
+        }
+        if (fcntl(afl_fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+            printf("Can't set O_NONBLOCK for the afl socket: %d, %s.\n", errno, strerror(errno));
+            return -1;
+        }
     }
     printf("Connection successful.\n");
 
@@ -904,14 +571,8 @@ main(int argc, char *argv[])
         return -1;
     }
 
+    signal(SIGPIPE, handle_sigpipe);
     handle_io(qtest_srv, afl_fd, &g_test_proxy_opt);
-
-    return 0;
-
-    send_vq_request(NULL);
-    do_interactive(-1);
-    /*printf("Start proxy\n");
-    do_proxy(afl_fd, user_fd);*/
 
     return 0;
 }
