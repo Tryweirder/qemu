@@ -62,6 +62,22 @@ expand-objs = $(strip $(sort $(filter %.o,$1)) \
                   $(foreach o,$(filter %.mo,$1),$($o-objs)) \
                   $(filter-out %.o %.mo,$1))
 
+# Add AFL build options. Two environment variables are used:
+#   - AFL_PATH: full path to the afl-clang-fast compiler
+#   - AFL_MODS: the qemu directories which should be built with
+#               the AFL support, for instance "hw/virtio". Note
+#               that multiple modules can be defined by using a
+#               space, for example "hw/virtio hw/block".
+#
+# For now only afl-clang-fast compiler is used. The additional
+# CFLAGS options is added to separate the AFL specific code:
+#   - AFL_FUZZING
+ifneq ($(AFL_PATH),)
+$(addsuffix /%.o,$(AFL_MODS)): CC = $(AFL_PATH)/afl-clang-fast
+$(addsuffix /%.o,$(AFL_MODS)): CFLAGS += -DAFL_FUZZING
+qemu-system-x86_64: LINKPROG = $(AFL_PATH)/afl-clang-fast
+endif
+
 %.o: %.c
 	$(call quiet-command,$(CC) $(QEMU_LOCAL_INCLUDES) $(QEMU_INCLUDES) \
 	       $(QEMU_CFLAGS) $(QEMU_DGFLAGS) $(CFLAGS) $($@-cflags) \
