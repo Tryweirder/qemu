@@ -82,7 +82,7 @@ static ssize_t filter_buffer_receive_iov(NetFilterState *nf,
      * May need more thoughts (e.g keeping sent_cb).
      */
     qemu_net_queue_append_iov(s->incoming_queue, sender, flags,
-                              iov, iovcnt, NULL);
+                              iov, iovcnt, NULL, NULL);
     return iov_size(iov, iovcnt);
 }
 

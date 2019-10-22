@@ -57,22 +57,24 @@ static char *drive_create(void)
     return tmp_path;
 }
 
-static QOSState *pci_test_start(void)
+static QOSState *pci_test_start(const char *extra_args)
 {
     QOSState *qs;
     const char *arch = qtest_get_arch();
     char *tmp_path;
     const char *cmd = "-drive if=none,id=drive0,file=%s,format=raw "
                       "-drive if=none,id=drive1,file=null-co://,format=raw "
-                      "-device virtio-blk-pci,id=drv0,drive=drive0,"
-                      "addr=%x.%x";
+                      "-device virtio-blk-pci,id=drv0,drive=drive0,addr=%x.%x "
+                      "%s ";
 
     tmp_path = drive_create();
 
     if (strcmp(arch, "i386") == 0 || strcmp(arch, "x86_64") == 0) {
-        qs = qtest_pc_boot(cmd, tmp_path, PCI_SLOT, PCI_FN);
+        qs = qtest_pc_boot(cmd, tmp_path, PCI_SLOT, PCI_FN,
+                (extra_args ? extra_args : ""));
     } else if (strcmp(arch, "ppc64") == 0) {
-        qs = qtest_spapr_boot(cmd, tmp_path, PCI_SLOT, PCI_FN);
+        qs = qtest_spapr_boot(cmd, tmp_path, PCI_SLOT, PCI_FN,
+                (extra_args ? extra_args : ""));
     } else {
         g_printerr("virtio-blk tests are only available on x86 or ppc64\n");
         exit(EXIT_FAILURE);
@@ -286,7 +288,7 @@ static void pci_basic(void)
     QOSState *qs;
     QVirtQueuePCI *vqpci;
 
-    qs = pci_test_start();
+    qs = pci_test_start(NULL);
     dev = virtio_blk_pci_init(qs->pcibus, PCI_SLOT);
 
     vqpci = (QVirtQueuePCI *)qvirtqueue_setup(&dev->vdev, qs->alloc, 0);
@@ -314,7 +316,7 @@ static void pci_indirect(void)
     uint8_t status;
     char *data;
 
-    qs = pci_test_start();
+    qs = pci_test_start(NULL);
 
     dev = virtio_blk_pci_init(qs->pcibus, PCI_SLOT);
 
@@ -400,7 +402,7 @@ static void pci_config(void)
     int n_size = TEST_IMAGE_SIZE / 2;
     uint64_t capacity;
 
-    qs = pci_test_start();
+    qs = pci_test_start(NULL);
 
     dev = virtio_blk_pci_init(qs->pcibus, PCI_SLOT);
 
@@ -437,7 +439,7 @@ static void pci_msix(void)
     uint8_t status;
     char *data;
 
-    qs = pci_test_start();
+    qs = pci_test_start(NULL);
 
     dev = virtio_blk_pci_init(qs->pcibus, PCI_SLOT);
     qpci_msix_enable(dev->pdev);
@@ -545,7 +547,7 @@ static void pci_idx(void)
     uint8_t status;
     char *data;
 
-    qs = pci_test_start();
+    qs = pci_test_start(NULL);
 
     dev = virtio_blk_pci_init(qs->pcibus, PCI_SLOT);
     qpci_msix_enable(dev->pdev);
@@ -659,22 +661,55 @@ static void pci_hotplug(void)
     QOSState *qs;
     const char *arch = qtest_get_arch();
 
-    qs = pci_test_start();
+    const char *mtype = qtest_get_default_machine_type();
+    g_assert(mtype);
+    bool is_q35 = (strcmp(mtype, "q35") == 0);
 
-    /* plug secondary disk */
-    qpci_plug_device_test("virtio-blk-pci", "drv1", PCI_SLOT_HP,
-                          "'drive': 'drive1'");
+    if (is_q35) {
+        /* q35 uses pcie bus which does not support hotplugging directly
+         * add ioh3420 switch and use that bus for hotplug */
+        qs = pci_test_start("-device ioh3420,multifunction=on,id=ioh.1 ");
 
-    dev = virtio_blk_pci_init(qs->pcibus, PCI_SLOT_HP);
-    g_assert(dev);
-    qvirtio_pci_device_disable(dev);
-    qvirtio_pci_device_free(dev);
+        /* plug secondary disk */
+        qpci_plug_device_test("virtio-blk-pci", "drv1", 0,
+                "'drive': 'drive1', 'bus': 'ioh.1', 'disable-legacy':'off'");
 
-    /* unplug secondary disk */
-    if (strcmp(arch, "i386") == 0 || strcmp(arch, "x86_64") == 0) {
+        /* expect device to be on the only secondary bus at devfn 0 */
+        g_assert(qs->pcibus);
+        g_assert(!QLIST_EMPTY(&qs->pcibus->children));
+        QPCIBus *secondary_bus = QLIST_FIRST(&qs->pcibus->children);
+        g_assert(secondary_bus);
+
+        /*
+         * TODO: We don't know how to talk to PCI devices over
+         * PCIe-to-PCI bridges.
+         * For now just make sure that it is simply there.
+         */
+        dev = qvirtio_pci_device_find_slot(secondary_bus, VIRTIO_ID_BLOCK, 0);
+        g_assert(dev);
+        qvirtio_pci_device_free(dev);
+    } else {
+        qs = pci_test_start(NULL);
+
+        /* plug secondary disk */
+        qpci_plug_device_test("virtio-blk-pci", "drv1", PCI_SLOT_HP,
+                "'drive': 'drive1'");
+
+        g_assert(qs->pcibus);
+
+        dev = virtio_blk_pci_init(qs->pcibus, PCI_SLOT_HP);
+        g_assert(dev);
+        qvirtio_pci_device_disable(dev);
+        qvirtio_pci_device_free(dev);
+    }
+
+    /* unplug secondary disk (q35 does not support acpihp) */
+    if (!is_q35 && (strcmp(arch, "i386") == 0 || strcmp(arch, "x86_64") == 0)) {
         qpci_unplug_acpi_device_test("drv1", PCI_SLOT_HP);
     }
+
     qtest_shutdown(qs);
+    g_free((void *)mtype);
 }
 
 /*
@@ -687,7 +722,7 @@ static void test_nonexistent_virtqueue(void)
     QOSState *qs;
     QPCIDevice *dev;
 
-    qs = pci_test_start();
+    qs = pci_test_start(NULL);
     dev = qpci_device_find(qs->pcibus, QPCI_DEVFN(4, 0));
     g_assert(dev != NULL);
 

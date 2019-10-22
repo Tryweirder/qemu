@@ -13,8 +13,8 @@
 #include "qemu/osdep.h"
 #include "libqos/fw_cfg.h"
 #include "libqtest.h"
-
-#include "hw/nvram/fw_cfg_keys.h"
+#include "qapi/qmp/qdict.h"
+#include "standard-headers/linux/qemu_fw_cfg.h"
 
 typedef struct {
     const char *args;

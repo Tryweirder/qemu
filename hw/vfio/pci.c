@@ -696,6 +696,7 @@ retry:
         }
 
         g_free(vdev->msi_vectors);
+        vdev->msi_vectors = NULL;
 
         if (ret > 0 && ret != vdev->nr_vectors) {
             vdev->nr_vectors = ret;
@@ -1647,6 +1648,7 @@ static void vfio_bar_prepare(VFIOPCIDevice *vdev, int nr)
     bar->type = pci_bar & (bar->ioport ? ~PCI_BASE_ADDRESS_IO_MASK :
                                          ~PCI_BASE_ADDRESS_MEM_MASK);
     bar->size = bar->region.size;
+    bar->region.filter = vfio_lookup_region_filter(vdev, nr, bar->region.size);
 }
 
 static void vfio_bars_prepare(VFIOPCIDevice *vdev)
@@ -1675,9 +1677,11 @@ static void vfio_bar_register(VFIOPCIDevice *vdev, int nr)
     if (bar->region.size) {
         memory_region_add_subregion(bar->mr, 0, bar->region.mem);
 
-        if (vfio_region_mmap(&bar->region)) {
-            error_report("Failed to mmap %s BAR %d. Performance may be slow",
-                         vdev->vbasedev.name, nr);
+        if (!bar->region.filter) {
+            if (vfio_region_mmap(&bar->region)) {
+                error_report("Failed to mmap %s BAR %d. Performance may be slow",
+                        vdev->vbasedev.name, nr);
+            }
         }
     }
 
@@ -1704,6 +1708,10 @@ static void vfio_bars_exit(VFIOPCIDevice *vdev)
         vfio_region_exit(&bar->region);
         if (bar->region.size) {
             memory_region_del_subregion(bar->mr, bar->region.mem);
+        }
+
+        if (bar->region.filter) {
+            vfio_put_region_filter(bar->region.filter);
         }
     }
 

@@ -322,6 +322,10 @@ void hmp_info_migrate_parameters(Monitor *mon, const QDict *qdict)
         monitor_printf(mon, "%s: %u\n",
             MigrationParameter_str(MIGRATION_PARAMETER_CPU_THROTTLE_INCREMENT),
             params->cpu_throttle_increment);
+        assert(params->has_max_cpu_throttle);
+        monitor_printf(mon, "%s: %u\n",
+            MigrationParameter_str(MIGRATION_PARAMETER_MAX_CPU_THROTTLE),
+            params->max_cpu_throttle);
         assert(params->has_tls_creds);
         monitor_printf(mon, "%s: '%s'\n",
             MigrationParameter_str(MIGRATION_PARAMETER_TLS_CREDS),
@@ -355,6 +359,10 @@ void hmp_info_migrate_parameters(Monitor *mon, const QDict *qdict)
         monitor_printf(mon, "%s: %" PRIu64 "\n",
             MigrationParameter_str(MIGRATION_PARAMETER_XBZRLE_CACHE_SIZE),
             params->xbzrle_cache_size);
+        assert(params->has_x_cpu_throttle_force_stop);
+        monitor_printf(mon, "%s: %s\n",
+            MigrationParameter_str(MIGRATION_PARAMETER_X_CPU_THROTTLE_FORCE_STOP),
+            params->x_cpu_throttle_force_stop ? "on" : "off");
     }
 
     qapi_free_MigrationParameters(params);
@@ -1586,6 +1594,10 @@ void hmp_migrate_set_parameter(Monitor *mon, const QDict *qdict)
         p->has_cpu_throttle_increment = true;
         visit_type_int(v, param, &p->cpu_throttle_increment, &err);
         break;
+    case MIGRATION_PARAMETER_MAX_CPU_THROTTLE:
+        p->has_max_cpu_throttle = true;
+        visit_type_int(v, param, &p->max_cpu_throttle, &err);
+        break;
     case MIGRATION_PARAMETER_TLS_CREDS:
         p->has_tls_creds = true;
         p->tls_creds = g_new0(StrOrNull, 1);
@@ -1641,6 +1653,10 @@ void hmp_migrate_set_parameter(Monitor *mon, const QDict *qdict)
             break;
         }
         p->xbzrle_cache_size = cache_size;
+        break;
+    case MIGRATION_PARAMETER_X_CPU_THROTTLE_FORCE_STOP:
+        p->has_x_cpu_throttle_force_stop = true;
+        visit_type_bool(v, param, &p->x_cpu_throttle_force_stop, &err);
         break;
     default:
         assert(0);
@@ -2318,7 +2334,7 @@ void hmp_qemu_io(Monitor *mon, const QDict *qdict)
     Error *err = NULL;
     int ret;
 
-    blk = blk_by_name(device);
+    blk = blk_lookup(device);
     if (!blk) {
         BlockDriverState *bs = bdrv_lookup_bs(NULL, device, &err);
         if (bs) {

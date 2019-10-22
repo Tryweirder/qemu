@@ -47,6 +47,7 @@
 #include "exec/address-spaces.h"
 #include "sysemu/xen-mapcache.h"
 #include "trace-root.h"
+#include "qapi/qapi-commands-misc.h"
 
 #ifdef CONFIG_FALLOCATE_PUNCH_HOLE
 #include <linux/falloc.h>
@@ -87,23 +88,6 @@ AddressSpace address_space_memory;
 
 MemoryRegion io_mem_rom, io_mem_notdirty;
 static MemoryRegion io_mem_unassigned;
-
-/* RAM is pre-allocated and passed into qemu_ram_alloc_from_ptr */
-#define RAM_PREALLOC   (1 << 0)
-
-/* RAM is mmap-ed with MAP_SHARED */
-#define RAM_SHARED     (1 << 1)
-
-/* Only a portion of RAM (used_length) is actually used, and migrated.
- * This used_length size can change across reboots.
- */
-#define RAM_RESIZEABLE (1 << 2)
-
-/* UFFDIO_ZEROPAGE is available on this RAMBlock to atomically
- * zero the page and wake waiting processes.
- * (Set during postcopy)
- */
-#define RAM_UF_ZEROPAGE (1 << 3)
 #endif
 
 #ifdef TARGET_PAGE_BITS_VARY
@@ -1682,7 +1666,8 @@ static void *file_ram_alloc(RAMBlock *block,
     }
 
     area = qemu_ram_mmap(fd, memory, block->mr->align,
-                         block->flags & RAM_SHARED);
+                         block->flags & RAM_SHARED,
+                         block->flags & RAM_PROTECTED);
     if (area == MAP_FAILED) {
         error_setg_errno(errp, errno,
                          "unable to map backing store for guest RAM");
@@ -1791,9 +1776,34 @@ const char *qemu_ram_get_idstr(RAMBlock *rb)
     return rb->idstr;
 }
 
+void *qemu_ram_get_host_addr(RAMBlock *rb)
+{
+    return rb->host;
+}
+
+ram_addr_t qemu_ram_get_offset(RAMBlock *rb)
+{
+    return rb->offset;
+}
+
+ram_addr_t qemu_ram_get_used_length(RAMBlock *rb)
+{
+    return rb->used_length;
+}
+
 bool qemu_ram_is_shared(RAMBlock *rb)
 {
     return rb->flags & RAM_SHARED;
+}
+
+bool qemu_ram_is_resizeable(RAMBlock *rb)
+{
+    return rb->flags & RAM_RESIZEABLE;
+}
+
+bool qemu_ram_is_preallocated(RAMBlock *rb)
+{
+    return rb->flags & RAM_PREALLOC;
 }
 
 /* Note: Only set at the start of postcopy */
@@ -2040,7 +2050,7 @@ static void ram_block_add(RAMBlock *new_block, Error **errp, bool shared)
 
 #ifdef __linux__
 RAMBlock *qemu_ram_alloc_from_fd(ram_addr_t size, MemoryRegion *mr,
-                                 bool share, int fd,
+                                 uint32_t ram_flags, int fd,
                                  Error **errp)
 {
     RAMBlock *new_block;
@@ -2082,14 +2092,14 @@ RAMBlock *qemu_ram_alloc_from_fd(ram_addr_t size, MemoryRegion *mr,
     new_block->mr = mr;
     new_block->used_length = size;
     new_block->max_length = size;
-    new_block->flags = share ? RAM_SHARED : 0;
+    new_block->flags = ram_flags;
     new_block->host = file_ram_alloc(new_block, size, fd, !file_size, errp);
     if (!new_block->host) {
         g_free(new_block);
         return NULL;
     }
 
-    ram_block_add(new_block, &local_err, share);
+    ram_block_add(new_block, &local_err, ram_flags & RAM_SHARED);
     if (local_err) {
         g_free(new_block);
         error_propagate(errp, local_err);
@@ -2101,7 +2111,7 @@ RAMBlock *qemu_ram_alloc_from_fd(ram_addr_t size, MemoryRegion *mr,
 
 
 RAMBlock *qemu_ram_alloc_from_file(ram_addr_t size, MemoryRegion *mr,
-                                   bool share, const char *mem_path,
+                                   uint32_t ram_flags, const char *mem_path,
                                    Error **errp)
 {
     int fd;
@@ -2113,7 +2123,7 @@ RAMBlock *qemu_ram_alloc_from_file(ram_addr_t size, MemoryRegion *mr,
         return NULL;
     }
 
-    block = qemu_ram_alloc_from_fd(size, mr, share, fd, errp);
+    block = qemu_ram_alloc_from_fd(size, mr, ram_flags, fd, errp);
     if (!block) {
         if (created) {
             unlink(mem_path);
@@ -2270,6 +2280,25 @@ void qemu_ram_remap(ram_addr_t addr, ram_addr_t length)
             }
         }
     }
+}
+
+void qemu_ram_unprotect_all(void)
+{
+    RAMBlock *block;
+    rcu_read_lock();
+    RAMBLOCK_FOREACH(block) {
+        if (block->flags & RAM_PROTECTED) {
+            if (mprotect(block->host, block->max_length,
+                         PROT_READ | PROT_WRITE)) {
+                error_report("mprotect_failed %d %s %p", errno, strerror(errno),
+                             block->host);
+                abort();
+            } else {
+                block->flags &= ~RAM_PROTECTED;
+            }
+        }
+    }
+    rcu_read_unlock();
 }
 #endif /* !_WIN32 */
 
@@ -3560,7 +3589,8 @@ void *address_space_map(AddressSpace *as,
 void address_space_unmap(AddressSpace *as, void *buffer, hwaddr len,
                          int is_write, hwaddr access_len)
 {
-    if (buffer != bounce.buffer) {
+    if ((buffer < bounce.buffer) ||
+        (buffer + access_len > bounce.buffer + bounce.len)) {
         MemoryRegion *mr;
         ram_addr_t addr1;
 
@@ -3596,7 +3626,8 @@ void *cpu_physical_memory_map(hwaddr addr,
 void cpu_physical_memory_unmap(void *buffer, hwaddr len,
                                int is_write, hwaddr access_len)
 {
-    return address_space_unmap(&address_space_memory, buffer, len, is_write, access_len);
+    return address_space_unmap(&address_space_memory, buffer, len, is_write,
+                               access_len);
 }
 
 #define ARG1_DECL                AddressSpace *as
@@ -3740,8 +3771,7 @@ int qemu_ram_foreach_block(RAMBlockIterFunc func, void *opaque)
 
     rcu_read_lock();
     RAMBLOCK_FOREACH(block) {
-        ret = func(block->idstr, block->host, block->offset,
-                   block->used_length, opaque);
+        ret = func(block, opaque);
         if (ret) {
             break;
         }
@@ -3847,6 +3877,22 @@ err:
 
 #endif
 
+void qemu_ram_dma_addref(RAMBlock *rb)
+{
+    rb->dma_refs++;
+}
+
+void qemu_ram_dma_decref(RAMBlock *rb)
+{
+    assert(rb->dma_refs > 0);
+    rb->dma_refs--;
+}
+
+int qemu_ram_dma_getref(RAMBlock *rb)
+{
+    return rb->dma_refs;
+}
+
 void page_size_init(void)
 {
     /* NOTE: we can always suppose that qemu_host_page_size >=
@@ -3942,4 +3988,59 @@ void mtree_print_dispatch(fprintf_function mon, void *f,
     }
 }
 
+RamBlockInfoList *qmp_query_ramblocks(Error **errp)
+{
+    RamBlockInfoList *head = NULL;
+    FILE *fp;
+    char *line = NULL;
+    size_t len = 0;
+    ssize_t read;
+    uint64_t addr_start, addr_end, rss_size;
+    ram_addr_t offset;
+
+    fp = fopen("/proc/self/smaps", "r");
+    if (fp == NULL) {
+        error_setg_file_open(errp, errno, "/proc/self/smaps");
+        return NULL;
+    }
+
+    while ((read = getline(&line, &len, fp)) != -1) {
+        int fields;
+        RAMBlock *block;
+
+        fields = sscanf(line, "%"PRIx64"-%"PRIx64, &addr_start, &addr_end);
+        if (fields != 2) {
+            continue;
+        }
+
+        block = qemu_ram_block_from_host((void *)(uintptr_t)addr_start, false,
+                                         &offset);
+        if (block == NULL) {
+            continue;
+        }
+
+        while ((read = getline(&line, &len, fp)) != -1) {
+            fields = sscanf(line, "Rss: %"PRIu64" kB", &rss_size);
+            if (fields != 1) {
+                continue;
+            }
+
+            RamBlockInfoList *list_item = g_new0(typeof(*list_item), 1);
+            RamBlockInfo *rb_item = g_new0(typeof(*rb_item), 1);
+
+            rb_item->used = rss_size * 1024;
+            rb_item->size = block->max_length;
+            rb_item->id = g_strdup(block->idstr);
+
+            list_item->value = rb_item;
+            list_item->next = head;
+            head = list_item;
+            break;
+        }
+    }
+
+    free(line);
+    fclose(fp);
+    return head;
+}
 #endif

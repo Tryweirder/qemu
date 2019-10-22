@@ -63,7 +63,7 @@ static const char *get_devstr(void)
         return "virtio-net-ccw";
     }
 
-    return "rtl8139";
+    return "virtio-net";
 }
 
 

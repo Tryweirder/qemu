@@ -71,6 +71,8 @@
 /* Define default autoconverge cpu throttle migration parameters */
 #define DEFAULT_MIGRATE_CPU_THROTTLE_INITIAL 20
 #define DEFAULT_MIGRATE_CPU_THROTTLE_INCREMENT 10
+#define DEFAULT_MIGRATE_MAX_CPU_THROTTLE 99
+#define DEFAULT_MIGRATE_X_CPU_THROTTLE_FORCE_STOP false
 
 /* Migration XBZRLE default cache size */
 #define DEFAULT_MIGRATE_XBZRLE_CACHE_SIZE (64 * 1024 * 1024)
@@ -109,6 +111,7 @@ static bool migration_object_check(MigrationState *ms, Error **errp);
 static int migration_maybe_pause(MigrationState *s,
                                  int *current_active_state,
                                  int new_state);
+static void migrate_fd_cancel(MigrationState *s);
 
 void migration_object_init(void)
 {
@@ -134,8 +137,13 @@ void migration_object_init(void)
     }
 }
 
-void migration_object_finalize(void)
+void migration_shutdown(void)
 {
+    /*
+     * Cancel the current migration - that will (eventually)
+     * stop the migration using this structure
+     */
+    migrate_fd_cancel(current_migration);
     object_unref(OBJECT(current_migration));
 }
 
@@ -556,6 +564,10 @@ MigrationParameters *qmp_query_migrate_parameters(Error **errp)
     params->x_multifd_page_count = s->parameters.x_multifd_page_count;
     params->has_xbzrle_cache_size = true;
     params->xbzrle_cache_size = s->parameters.xbzrle_cache_size;
+    params->has_max_cpu_throttle = true;
+    params->max_cpu_throttle = s->parameters.max_cpu_throttle;
+    params->has_x_cpu_throttle_force_stop = true;
+    params->x_cpu_throttle_force_stop = s->parameters.x_cpu_throttle_force_stop;
 
     return params;
 }
@@ -748,6 +760,11 @@ static bool migrate_caps_check(bool *cap_list,
             error_setg(errp, "Postcopy is not supported");
             return false;
         }
+
+        if (cap_list[MIGRATION_CAPABILITY_X_IGNORE_SHARED]) {
+            error_setg(errp, "Postcopy is not compatible with ignore-shared");
+            return false;
+        }
     }
 
     return true;
@@ -861,6 +878,15 @@ static bool migrate_params_check(MigrationParameters *params, Error **errp)
         return false;
     }
 
+    if (params->has_max_cpu_throttle &&
+        (params->max_cpu_throttle < params->cpu_throttle_initial ||
+         params->max_cpu_throttle > 99)) {
+        error_setg(errp, QERR_INVALID_PARAMETER_VALUE,
+                   "max_cpu_throttle",
+                   "an integer in the range of cpu_throttle_initial to 99");
+        return false;
+    }
+
     return true;
 }
 
@@ -924,6 +950,12 @@ static void migrate_params_test_apply(MigrateSetParameters *params,
     }
     if (params->has_xbzrle_cache_size) {
         dest->xbzrle_cache_size = params->xbzrle_cache_size;
+    }
+    if (params->has_max_cpu_throttle) {
+        dest->max_cpu_throttle = params->max_cpu_throttle;
+    }
+    if (params->has_x_cpu_throttle_force_stop) {
+        dest->x_cpu_throttle_force_stop = params->x_cpu_throttle_force_stop;
     }
 }
 
@@ -996,6 +1028,13 @@ static void migrate_params_apply(MigrateSetParameters *params, Error **errp)
     if (params->has_xbzrle_cache_size) {
         s->parameters.xbzrle_cache_size = params->xbzrle_cache_size;
         xbzrle_cache_resize(params->xbzrle_cache_size, errp);
+    }
+    if (params->has_max_cpu_throttle) {
+        s->parameters.max_cpu_throttle = params->max_cpu_throttle;
+    }
+    if (params->has_x_cpu_throttle_force_stop) {
+        s->parameters.x_cpu_throttle_force_stop =
+            params->x_cpu_throttle_force_stop;
     }
 }
 
@@ -1102,10 +1141,8 @@ static void block_cleanup_parameters(MigrationState *s)
     }
 }
 
-static void migrate_fd_cleanup(void *opaque)
+static void migrate_fd_cleanup(MigrationState *s)
 {
-    MigrationState *s = opaque;
-
     qemu_bh_delete(s->cleanup_bh);
     s->cleanup_bh = NULL;
 
@@ -1143,6 +1180,21 @@ static void migrate_fd_cleanup(void *opaque)
     }
     notifier_list_notify(&migration_state_notifiers, s);
     block_cleanup_parameters(s);
+}
+
+static void migrate_fd_cleanup_schedule(MigrationState *s)
+{
+    /* Ref the state for bh, because it may be called when
+     * there're already no other refs */
+    object_ref(OBJECT(s));
+    qemu_bh_schedule(s->cleanup_bh);
+}
+
+static void migrate_fd_cleanup_bh(void *opaque)
+{
+    MigrationState *s = opaque;
+    migrate_fd_cleanup(s);
+    object_unref(OBJECT(s));
 }
 
 void migrate_set_error(MigrationState *s, const Error *error)
@@ -1584,6 +1636,24 @@ bool migrate_dirty_bitmaps(void)
     s = migrate_get_current();
 
     return s->enabled_capabilities[MIGRATION_CAPABILITY_DIRTY_BITMAPS];
+}
+
+bool migrate_ignore_shared(void)
+{
+    MigrationState *s;
+
+    s = migrate_get_current();
+
+    return s->enabled_capabilities[MIGRATION_CAPABILITY_X_IGNORE_SHARED];
+}
+
+bool migrate_validate_uuid(void)
+{
+    MigrationState *s;
+
+    s = migrate_get_current();
+
+    return s->enabled_capabilities[MIGRATION_CAPABILITY_X_VALIDATE_UUID];
 }
 
 bool migrate_use_events(void)
@@ -2195,6 +2265,51 @@ bool migrate_colo_enabled(void)
     return s->enabled_capabilities[MIGRATION_CAPABILITY_X_COLO];
 }
 
+typedef enum MigThrError {
+    /* No error detected */
+    MIG_THR_ERR_NONE = 0,
+    /* Detected error, but resumed successfully */
+    MIG_THR_ERR_RECOVERED = 1,
+    /* Detected fatal error, need to exit */
+    MIG_THR_ERR_FATAL = 2,
+} MigThrError;
+
+static MigThrError migration_detect_error(MigrationState *s)
+{
+    int ret;
+    int state = s->state;
+    Error *local_error = NULL;
+
+    if (state == MIGRATION_STATUS_CANCELLING ||
+        state == MIGRATION_STATUS_CANCELLED) {
+        /* End the migration, but don't set the state to failed */
+        return MIG_THR_ERR_FATAL;
+    }
+
+    /* Try to detect any file errors */
+    ret = qemu_file_get_error_obj(s->to_dst_file, &local_error);
+    if (!ret) {
+        /* Everything is fine */
+        assert(!local_error);
+        return MIG_THR_ERR_NONE;
+    }
+
+    if (local_error) {
+        migrate_set_error(s, local_error);
+        error_free(local_error);
+    }
+
+    /*
+     * For precopy (or postcopy with error outside IO), we fail
+     * with no time.
+     */
+    migrate_set_state(&s->state, state, MIGRATION_STATUS_FAILED);
+    trace_migration_thread_file_err();
+
+    /* Time to stop the migration, now. */
+    return MIG_THR_ERR_FATAL;
+}
+
 static void migration_calculate_complete(MigrationState *s)
 {
     uint64_t bytes = qemu_ftell(s->to_dst_file);
@@ -2273,7 +2388,8 @@ static MigIterateState migration_iteration_run(MigrationState *s)
     trace_migrate_pending(pending_size, s->threshold_size,
                           pend_pre, pend_compat, pend_post);
 
-    if (pending_size && pending_size >= s->threshold_size) {
+    if (pending_size && pending_size >= s->threshold_size &&
+        !qemu_savevm_state_should_complete_precopy()) {
         /* Still a significant amount to transfer */
         if (migrate_postcopy() && !in_postcopy &&
             pend_pre <= s->threshold_size &&
@@ -2339,7 +2455,7 @@ static void migration_iteration_finish(MigrationState *s)
         error_report("%s: Unknown ending state %d", __func__, s->state);
         break;
     }
-    qemu_bh_schedule(s->cleanup_bh);
+    migrate_fd_cleanup_schedule(s);
     qemu_mutex_unlock_iothread();
 }
 
@@ -2351,9 +2467,11 @@ static void *migration_thread(void *opaque)
 {
     MigrationState *s = opaque;
     int64_t setup_start = qemu_clock_get_ms(QEMU_CLOCK_HOST);
+    MigThrError thr_error;
 
     rcu_register_thread();
 
+    object_ref(OBJECT(s));
     s->iteration_start_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
 
     qemu_savevm_state_header(s->to_dst_file);
@@ -2400,13 +2518,22 @@ static void *migration_thread(void *opaque)
             }
         }
 
-        if (qemu_file_get_error(s->to_dst_file)) {
-            if (migration_is_setup_or_active(s->state)) {
-                migrate_set_state(&s->state, s->state,
-                                  MIGRATION_STATUS_FAILED);
-            }
-            trace_migration_thread_file_err();
+        /*
+         * Try to detect any kind of failures, and see whether we
+         * should stop the migration now.
+         */
+        thr_error = migration_detect_error(s);
+        if (thr_error == MIG_THR_ERR_FATAL) {
+            /* Stop migration */
             break;
+        } else if (thr_error == MIG_THR_ERR_RECOVERED) {
+            /*
+             * Just recovered from a e.g. network failure, reset all
+             * the local variables. This is important to avoid
+             * breaking transferred_bytes and bandwidth calculation
+             */
+            s->iteration_start_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+            s->iteration_initial_bytes = 0;
         }
 
         current_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
@@ -2422,6 +2549,7 @@ static void *migration_thread(void *opaque)
 
     trace_migration_thread_after_loop();
     migration_iteration_finish(s);
+    object_unref(OBJECT(s));
     rcu_unregister_thread();
     return NULL;
 }
@@ -2429,7 +2557,7 @@ static void *migration_thread(void *opaque)
 void migrate_fd_connect(MigrationState *s, Error *error_in)
 {
     s->expected_downtime = s->parameters.downtime_limit;
-    s->cleanup_bh = qemu_bh_new(migrate_fd_cleanup, s);
+    s->cleanup_bh = qemu_bh_new(migrate_fd_cleanup_bh, s);
     if (error_in) {
         migrate_fd_error(s, error_in);
         migrate_fd_cleanup(s);
@@ -2529,6 +2657,12 @@ static Property migration_properties[] = {
     DEFINE_PROP_SIZE("xbzrle-cache-size", MigrationState,
                       parameters.xbzrle_cache_size,
                       DEFAULT_MIGRATE_XBZRLE_CACHE_SIZE),
+    DEFINE_PROP_UINT8("max-cpu-throttle", MigrationState,
+                      parameters.max_cpu_throttle,
+                      DEFAULT_MIGRATE_MAX_CPU_THROTTLE),
+    DEFINE_PROP_BOOL("x-cpu-throttle-force-stop", MigrationState,
+                      parameters.x_cpu_throttle_force_stop,
+                      DEFAULT_MIGRATE_X_CPU_THROTTLE_FORCE_STOP),
 
     /* Migration capabilities */
     DEFINE_PROP_MIG_CAP("x-xbzrle", MIGRATION_CAPABILITY_XBZRLE),
@@ -2593,6 +2727,8 @@ static void migration_instance_init(Object *obj)
     params->has_x_multifd_channels = true;
     params->has_x_multifd_page_count = true;
     params->has_xbzrle_cache_size = true;
+    params->has_max_cpu_throttle = true;
+    params->has_x_cpu_throttle_force_stop = true;
 }
 
 /*

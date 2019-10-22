@@ -281,17 +281,36 @@ static void x86_cpu_vendor_words2str(char *dst, uint32_t vendor1,
           /* missing:
           CPUID_XSAVE_XSAVEC, CPUID_XSAVE_XSAVES */
 
+typedef enum FeatureWordType {
+   CPUID_FEATURE_WORD,
+   MSR_FEATURE_WORD,
+} FeatureWordType;
+
 typedef struct FeatureWordInfo {
+    FeatureWordType type;
     /* feature flags names are taken from "Intel Processor Identification and
      * the CPUID Instruction" and AMD's "CPUID Specification".
      * In cases of disagreement between feature naming conventions,
      * aliases may be added.
      */
     const char *feat_names[32];
-    uint32_t cpuid_eax;   /* Input EAX for CPUID */
-    bool cpuid_needs_ecx; /* CPUID instruction uses ECX as input */
-    uint32_t cpuid_ecx;   /* Input ECX value for CPUID */
-    int cpuid_reg;        /* output register (R_* constant) */
+    union {
+        /* If type==CPUID_FEATURE_WORD */
+        struct {
+            uint32_t eax;   /* Input EAX for CPUID */
+            bool needs_ecx; /* CPUID instruction uses ECX as input */
+            uint32_t ecx;   /* Input ECX value for CPUID */
+            int reg;        /* output register (R_* constant) */
+        } cpuid;
+        /* If type==MSR_FEATURE_WORD */
+        struct {
+            uint32_t index;
+            struct {   /*CPUID that enumerate this MSR*/
+                FeatureWord cpuid_class;
+                uint32_t    cpuid_flag;
+            } cpuid_dep;
+        } msr;
+    };
     uint32_t tcg_features; /* Feature flags supported by TCG */
     uint32_t unmigratable_flags; /* Feature flags known to be unmigratable */
     uint32_t migratable_flags; /* Feature flags known to be migratable */
@@ -301,6 +320,7 @@ typedef struct FeatureWordInfo {
 
 static FeatureWordInfo feature_word_info[FEATURE_WORDS] = {
     [FEAT_1_EDX] = {
+        .type = CPUID_FEATURE_WORD,
         .feat_names = {
             "fpu", "vme", "de", "pse",
             "tsc", "msr", "pae", "mce",
@@ -311,10 +331,11 @@ static FeatureWordInfo feature_word_info[FEATURE_WORDS] = {
             "fxsr", "sse", "sse2", "ss",
             "ht" /* Intel htt */, "tm", "ia64", "pbe",
         },
-        .cpuid_eax = 1, .cpuid_reg = R_EDX,
+        .cpuid = {.eax = 1, .reg = R_EDX, },
         .tcg_features = TCG_FEATURES,
     },
     [FEAT_1_ECX] = {
+        .type = CPUID_FEATURE_WORD,
         .feat_names = {
             "pni" /* Intel,AMD sse3 */, "pclmulqdq", "dtes64", "monitor",
             "ds-cpl", "vmx", "smx", "est",
@@ -325,7 +346,7 @@ static FeatureWordInfo feature_word_info[FEATURE_WORDS] = {
             "tsc-deadline", "aes", "xsave", "osxsave",
             "avx", "f16c", "rdrand", "hypervisor",
         },
-        .cpuid_eax = 1, .cpuid_reg = R_ECX,
+        .cpuid = { .eax = 1, .reg = R_ECX, },
         .tcg_features = TCG_EXT_FEATURES,
     },
     /* Feature names that are already defined on feature_name[] but
@@ -334,6 +355,7 @@ static FeatureWordInfo feature_word_info[FEATURE_WORDS] = {
      * to features[FEAT_8000_0001_EDX] if and only if CPU vendor is AMD.
      */
     [FEAT_8000_0001_EDX] = {
+        .type = CPUID_FEATURE_WORD,
         .feat_names = {
             NULL /* fpu */, NULL /* vme */, NULL /* de */, NULL /* pse */,
             NULL /* tsc */, NULL /* msr */, NULL /* pae */, NULL /* mce */,
@@ -344,10 +366,11 @@ static FeatureWordInfo feature_word_info[FEATURE_WORDS] = {
             NULL /* fxsr */, "fxsr-opt", "pdpe1gb", "rdtscp",
             NULL, "lm", "3dnowext", "3dnow",
         },
-        .cpuid_eax = 0x80000001, .cpuid_reg = R_EDX,
+        .cpuid = { .eax = 0x80000001, .reg = R_EDX, },
         .tcg_features = TCG_EXT2_FEATURES,
     },
     [FEAT_8000_0001_ECX] = {
+        .type = CPUID_FEATURE_WORD,
         .feat_names = {
             "lahf-lm", "cmp-legacy", "svm", "extapic",
             "cr8legacy", "abm", "sse4a", "misalignsse",
@@ -358,10 +381,11 @@ static FeatureWordInfo feature_word_info[FEATURE_WORDS] = {
             "perfctr-nb", NULL, NULL, NULL,
             NULL, NULL, NULL, NULL,
         },
-        .cpuid_eax = 0x80000001, .cpuid_reg = R_ECX,
+        .cpuid = { .eax = 0x80000001, .reg = R_ECX, },
         .tcg_features = TCG_EXT3_FEATURES,
     },
     [FEAT_C000_0001_EDX] = {
+        .type = CPUID_FEATURE_WORD,
         .feat_names = {
             NULL, NULL, "xstore", "xstore-en",
             NULL, NULL, "xcrypt", "xcrypt-en",
@@ -372,10 +396,11 @@ static FeatureWordInfo feature_word_info[FEATURE_WORDS] = {
             NULL, NULL, NULL, NULL,
             NULL, NULL, NULL, NULL,
         },
-        .cpuid_eax = 0xC0000001, .cpuid_reg = R_EDX,
+        .cpuid = { .eax = 0xC0000001, .reg = R_EDX, },
         .tcg_features = TCG_EXT4_FEATURES,
     },
     [FEAT_KVM] = {
+        .type = CPUID_FEATURE_WORD,
         .feat_names = {
             "kvmclock", "kvm-nopiodelay", "kvm-mmu", "kvmclock",
             "kvm-asyncpf", "kvm-steal-time", "kvm-pv-eoi", "kvm-pv-unhalt",
@@ -386,10 +411,11 @@ static FeatureWordInfo feature_word_info[FEATURE_WORDS] = {
             "kvmclock-stable-bit", NULL, NULL, NULL,
             NULL, NULL, NULL, NULL,
         },
-        .cpuid_eax = KVM_CPUID_FEATURES, .cpuid_reg = R_EAX,
+        .cpuid = { .eax = KVM_CPUID_FEATURES, .reg = R_EAX, },
         .tcg_features = TCG_KVM_FEATURES,
     },
     [FEAT_KVM_HINTS] = {
+        .type = CPUID_FEATURE_WORD,
         .feat_names = {
             "kvm-hint-dedicated", NULL, NULL, NULL,
             NULL, NULL, NULL, NULL,
@@ -400,7 +426,7 @@ static FeatureWordInfo feature_word_info[FEATURE_WORDS] = {
             NULL, NULL, NULL, NULL,
             NULL, NULL, NULL, NULL,
         },
-        .cpuid_eax = KVM_CPUID_FEATURES, .cpuid_reg = R_EDX,
+        .cpuid = { .eax = KVM_CPUID_FEATURES, .reg = R_EDX, },
         .tcg_features = TCG_KVM_FEATURES,
         /*
          * KVM hints aren't auto-enabled by -cpu host, they need to be
@@ -409,6 +435,7 @@ static FeatureWordInfo feature_word_info[FEATURE_WORDS] = {
         .no_autoenable_flags = ~0U,
     },
     [FEAT_HYPERV_EAX] = {
+        .type = CPUID_FEATURE_WORD,
         .feat_names = {
             NULL /* hv_msr_vp_runtime_access */, NULL /* hv_msr_time_refcount_access */,
             NULL /* hv_msr_synic_access */, NULL /* hv_msr_stimer_access */,
@@ -422,9 +449,10 @@ static FeatureWordInfo feature_word_info[FEATURE_WORDS] = {
             NULL, NULL, NULL, NULL,
             NULL, NULL, NULL, NULL,
         },
-        .cpuid_eax = 0x40000003, .cpuid_reg = R_EAX,
+        .cpuid = { .eax = 0x40000003, .reg = R_EAX, },
     },
     [FEAT_HYPERV_EBX] = {
+        .type = CPUID_FEATURE_WORD,
         .feat_names = {
             NULL /* hv_create_partitions */, NULL /* hv_access_partition_id */,
             NULL /* hv_access_memory_pool */, NULL /* hv_adjust_message_buffers */,
@@ -438,9 +466,10 @@ static FeatureWordInfo feature_word_info[FEATURE_WORDS] = {
             NULL, NULL, NULL, NULL,
             NULL, NULL, NULL, NULL,
         },
-        .cpuid_eax = 0x40000003, .cpuid_reg = R_EBX,
+        .cpuid = { .eax = 0x40000003, .reg = R_EBX, },
     },
     [FEAT_HYPERV_EDX] = {
+        .type = CPUID_FEATURE_WORD,
         .feat_names = {
             NULL /* hv_mwait */, NULL /* hv_guest_debugging */,
             NULL /* hv_perf_monitor */, NULL /* hv_cpu_dynamic_part */,
@@ -453,9 +482,10 @@ static FeatureWordInfo feature_word_info[FEATURE_WORDS] = {
             NULL, NULL, NULL, NULL,
             NULL, NULL, NULL, NULL,
         },
-        .cpuid_eax = 0x40000003, .cpuid_reg = R_EDX,
+        .cpuid = { .eax = 0x40000003, .reg = R_EDX, },
     },
     [FEAT_SVM] = {
+        .type = CPUID_FEATURE_WORD,
         .feat_names = {
             "npt", "lbrv", "svm-lock", "nrip-save",
             "tsc-scale", "vmcb-clean",  "flushbyasid", "decodeassists",
@@ -466,10 +496,11 @@ static FeatureWordInfo feature_word_info[FEATURE_WORDS] = {
             NULL, NULL, NULL, NULL,
             NULL, NULL, NULL, NULL,
         },
-        .cpuid_eax = 0x8000000A, .cpuid_reg = R_EDX,
+        .cpuid = { .eax = 0x8000000A, .reg = R_EDX, },
         .tcg_features = TCG_SVM_FEATURES,
     },
     [FEAT_7_0_EBX] = {
+        .type = CPUID_FEATURE_WORD,
         .feat_names = {
             "fsgsbase", "tsc-adjust", NULL, "bmi1",
             "hle", "avx2", NULL, "smep",
@@ -480,12 +511,15 @@ static FeatureWordInfo feature_word_info[FEATURE_WORDS] = {
             "clwb", "intel-pt", "avx512pf", "avx512er",
             "avx512cd", "sha-ni", "avx512bw", "avx512vl",
         },
-        .cpuid_eax = 7,
-        .cpuid_needs_ecx = true, .cpuid_ecx = 0,
-        .cpuid_reg = R_EBX,
+        .cpuid = {
+            .eax = 7,
+            .needs_ecx = true, .ecx = 0,
+            .reg = R_EBX,
+        },
         .tcg_features = TCG_7_0_EBX_FEATURES,
     },
     [FEAT_7_0_ECX] = {
+        .type = CPUID_FEATURE_WORD,
         .feat_names = {
             NULL, "avx512vbmi", "umip", "pku",
             "ospke", NULL, "avx512vbmi2", NULL,
@@ -496,28 +530,35 @@ static FeatureWordInfo feature_word_info[FEATURE_WORDS] = {
             NULL, NULL, NULL, NULL,
             NULL, NULL, NULL, NULL,
         },
-        .cpuid_eax = 7,
-        .cpuid_needs_ecx = true, .cpuid_ecx = 0,
-        .cpuid_reg = R_ECX,
+        .cpuid = {
+            .eax = 7,
+            .needs_ecx = true, .ecx = 0,
+            .reg = R_ECX,
+        },
         .tcg_features = TCG_7_0_ECX_FEATURES,
     },
     [FEAT_7_0_EDX] = {
+        .type = CPUID_FEATURE_WORD,
         .feat_names = {
             NULL, NULL, "avx512-4vnniw", "avx512-4fmaps",
             NULL, NULL, NULL, NULL,
+            NULL, NULL, "md-clear", NULL,
             NULL, NULL, NULL, NULL,
-            NULL, NULL, NULL, NULL,
-            NULL, NULL, NULL, NULL,
+            NULL, NULL, "pconfig", NULL,
             NULL, NULL, NULL, NULL,
             NULL, NULL, "spec-ctrl", NULL,
-            NULL, NULL, NULL, NULL,
+            NULL, "arch-capabilities", NULL, "ssbd",
         },
-        .cpuid_eax = 7,
-        .cpuid_needs_ecx = true, .cpuid_ecx = 0,
-        .cpuid_reg = R_EDX,
+        .cpuid = {
+            .eax = 7,
+            .needs_ecx = true, .ecx = 0,
+            .reg = R_EDX,
+        },
         .tcg_features = TCG_7_0_EDX_FEATURES,
+        .unmigratable_flags = CPUID_7_0_EDX_ARCH_CAPABILITIES,
     },
     [FEAT_8000_0007_EDX] = {
+        .type = CPUID_FEATURE_WORD,
         .feat_names = {
             NULL, NULL, NULL, NULL,
             NULL, NULL, NULL, NULL,
@@ -528,28 +569,28 @@ static FeatureWordInfo feature_word_info[FEATURE_WORDS] = {
             NULL, NULL, NULL, NULL,
             NULL, NULL, NULL, NULL,
         },
-        .cpuid_eax = 0x80000007,
-        .cpuid_reg = R_EDX,
+        .cpuid = { .eax = 0x80000007, .reg = R_EDX, },
         .tcg_features = TCG_APM_FEATURES,
-        .unmigratable_flags = CPUID_APM_INVTSC,
+        .unmigratable_flags = 0,
     },
     [FEAT_8000_0008_EBX] = {
+        .type = CPUID_FEATURE_WORD,
         .feat_names = {
             NULL, NULL, NULL, NULL,
             NULL, NULL, NULL, NULL,
-            NULL, NULL, NULL, NULL,
+            NULL, "wbnoinvd", NULL, NULL,
             "ibpb", NULL, NULL, NULL,
             NULL, NULL, NULL, NULL,
             NULL, NULL, NULL, NULL,
-            NULL, NULL, NULL, NULL,
+            NULL, "virt-ssbd", NULL, NULL,
             NULL, NULL, NULL, NULL,
         },
-        .cpuid_eax = 0x80000008,
-        .cpuid_reg = R_EBX,
+        .cpuid = { .eax = 0x80000008, .reg = R_EBX, },
         .tcg_features = 0,
         .unmigratable_flags = 0,
     },
     [FEAT_XSAVE] = {
+        .type = CPUID_FEATURE_WORD,
         .feat_names = {
             "xsaveopt", "xsavec", "xgetbv1", "xsaves",
             NULL, NULL, NULL, NULL,
@@ -560,12 +601,15 @@ static FeatureWordInfo feature_word_info[FEATURE_WORDS] = {
             NULL, NULL, NULL, NULL,
             NULL, NULL, NULL, NULL,
         },
-        .cpuid_eax = 0xd,
-        .cpuid_needs_ecx = true, .cpuid_ecx = 1,
-        .cpuid_reg = R_EAX,
+        .cpuid = {
+            .eax = 0xd,
+            .needs_ecx = true, .ecx = 1,
+            .reg = R_EAX,
+        },
         .tcg_features = TCG_XSAVE_FEATURES,
     },
     [FEAT_6_EAX] = {
+        .type = CPUID_FEATURE_WORD,
         .feat_names = {
             NULL, NULL, "arat", NULL,
             NULL, NULL, NULL, NULL,
@@ -576,13 +620,16 @@ static FeatureWordInfo feature_word_info[FEATURE_WORDS] = {
             NULL, NULL, NULL, NULL,
             NULL, NULL, NULL, NULL,
         },
-        .cpuid_eax = 6, .cpuid_reg = R_EAX,
+        .cpuid = { .eax = 6, .reg = R_EAX, },
         .tcg_features = TCG_6_EAX_FEATURES,
     },
     [FEAT_XSAVE_COMP_LO] = {
-        .cpuid_eax = 0xD,
-        .cpuid_needs_ecx = true, .cpuid_ecx = 0,
-        .cpuid_reg = R_EAX,
+        .type = CPUID_FEATURE_WORD,
+        .cpuid = {
+            .eax = 0xD,
+            .needs_ecx = true, .ecx = 0,
+            .reg = R_EAX,
+        },
         .tcg_features = ~0U,
         .migratable_flags = XSTATE_FP_MASK | XSTATE_SSE_MASK |
             XSTATE_YMM_MASK | XSTATE_BNDREGS_MASK | XSTATE_BNDCSR_MASK |
@@ -590,10 +637,34 @@ static FeatureWordInfo feature_word_info[FEATURE_WORDS] = {
             XSTATE_PKRU_MASK,
     },
     [FEAT_XSAVE_COMP_HI] = {
-        .cpuid_eax = 0xD,
-        .cpuid_needs_ecx = true, .cpuid_ecx = 0,
-        .cpuid_reg = R_EDX,
+        .type = CPUID_FEATURE_WORD,
+        .cpuid = {
+            .eax = 0xD,
+            .needs_ecx = true, .ecx = 0,
+            .reg = R_EDX,
+        },
         .tcg_features = ~0U,
+    },
+    /*Below are MSR exposed features*/
+    [FEAT_ARCH_CAPABILITIES] = {
+        .type = MSR_FEATURE_WORD,
+        .feat_names = {
+            "rdctl-no", "ibrs-all", "rsba", "skip-l1dfl-vmentry",
+            "ssb-no", "mds-no", NULL, NULL,
+            NULL, NULL, NULL, NULL,
+            NULL, NULL, NULL, NULL,
+            NULL, NULL, NULL, NULL,
+            NULL, NULL, NULL, NULL,
+            NULL, NULL, NULL, NULL,
+            NULL, NULL, NULL, NULL,
+        },
+        .msr = {
+            .index = MSR_IA32_ARCH_CAPABILITIES,
+            .cpuid_dep = {
+                FEAT_7_0_EDX,
+                CPUID_7_0_EDX_ARCH_CAPABILITIES
+            }
+        },
     },
 };
 
@@ -1678,7 +1749,7 @@ static X86CPUDefinition builtin_x86_defs[] = {
             CPUID_7_0_EBX_HLE | CPUID_7_0_EBX_AVX2 | CPUID_7_0_EBX_SMEP |
             CPUID_7_0_EBX_BMI2 | CPUID_7_0_EBX_ERMS | CPUID_7_0_EBX_INVPCID |
             CPUID_7_0_EBX_RTM | CPUID_7_0_EBX_RDSEED | CPUID_7_0_EBX_ADX |
-            CPUID_7_0_EBX_SMAP | CPUID_7_0_EBX_MPX,
+            CPUID_7_0_EBX_SMAP,
         /* Missing: XSAVES (not supported by some Linux versions,
          * including v4.1 to v4.12).
          * KVM doesn't yet expose any XSAVES state save component,
@@ -1725,7 +1796,7 @@ static X86CPUDefinition builtin_x86_defs[] = {
             CPUID_7_0_EBX_HLE | CPUID_7_0_EBX_AVX2 | CPUID_7_0_EBX_SMEP |
             CPUID_7_0_EBX_BMI2 | CPUID_7_0_EBX_ERMS | CPUID_7_0_EBX_INVPCID |
             CPUID_7_0_EBX_RTM | CPUID_7_0_EBX_RDSEED | CPUID_7_0_EBX_ADX |
-            CPUID_7_0_EBX_SMAP | CPUID_7_0_EBX_MPX,
+            CPUID_7_0_EBX_SMAP,
         /* Missing: XSAVES (not supported by some Linux versions,
          * including v4.1 to v4.12).
          * KVM doesn't yet expose any XSAVES state save component,
@@ -1770,7 +1841,7 @@ static X86CPUDefinition builtin_x86_defs[] = {
             CPUID_7_0_EBX_HLE | CPUID_7_0_EBX_AVX2 | CPUID_7_0_EBX_SMEP |
             CPUID_7_0_EBX_BMI2 | CPUID_7_0_EBX_ERMS | CPUID_7_0_EBX_INVPCID |
             CPUID_7_0_EBX_RTM | CPUID_7_0_EBX_RDSEED | CPUID_7_0_EBX_ADX |
-            CPUID_7_0_EBX_SMAP | CPUID_7_0_EBX_MPX | CPUID_7_0_EBX_CLWB |
+            CPUID_7_0_EBX_SMAP | CPUID_7_0_EBX_CLWB |
             CPUID_7_0_EBX_AVX512F | CPUID_7_0_EBX_AVX512DQ |
             CPUID_7_0_EBX_AVX512BW | CPUID_7_0_EBX_AVX512CD |
             CPUID_7_0_EBX_AVX512VL | CPUID_7_0_EBX_CLFLUSHOPT,
@@ -1820,7 +1891,7 @@ static X86CPUDefinition builtin_x86_defs[] = {
             CPUID_7_0_EBX_HLE | CPUID_7_0_EBX_AVX2 | CPUID_7_0_EBX_SMEP |
             CPUID_7_0_EBX_BMI2 | CPUID_7_0_EBX_ERMS | CPUID_7_0_EBX_INVPCID |
             CPUID_7_0_EBX_RTM | CPUID_7_0_EBX_RDSEED | CPUID_7_0_EBX_ADX |
-            CPUID_7_0_EBX_SMAP | CPUID_7_0_EBX_MPX | CPUID_7_0_EBX_CLWB |
+            CPUID_7_0_EBX_SMAP | CPUID_7_0_EBX_CLWB |
             CPUID_7_0_EBX_AVX512F | CPUID_7_0_EBX_AVX512DQ |
             CPUID_7_0_EBX_AVX512BW | CPUID_7_0_EBX_AVX512CD |
             CPUID_7_0_EBX_AVX512VL,
@@ -1837,6 +1908,215 @@ static X86CPUDefinition builtin_x86_defs[] = {
             CPUID_6_EAX_ARAT,
         .xlevel = 0x80000008,
         .model_id = "Intel Xeon Processor (Skylake, IBRS)",
+    },
+    {
+        .name = "Cascadelake-Server",
+        .level = 0xd,
+        .vendor = CPUID_VENDOR_INTEL,
+        .family = 6,
+        .model = 85,
+        .stepping = 6,
+        .features[FEAT_1_EDX] =
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
+            CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
+            CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
+            CPUID_DE | CPUID_FP87,
+        .features[FEAT_1_ECX] =
+            CPUID_EXT_AVX | CPUID_EXT_XSAVE | CPUID_EXT_AES |
+            CPUID_EXT_POPCNT | CPUID_EXT_X2APIC | CPUID_EXT_SSE42 |
+            CPUID_EXT_SSE41 | CPUID_EXT_CX16 | CPUID_EXT_SSSE3 |
+            CPUID_EXT_PCLMULQDQ | CPUID_EXT_SSE3 |
+            CPUID_EXT_TSC_DEADLINE_TIMER | CPUID_EXT_FMA | CPUID_EXT_MOVBE |
+            CPUID_EXT_PCID | CPUID_EXT_F16C | CPUID_EXT_RDRAND,
+        .features[FEAT_8000_0001_EDX] =
+            CPUID_EXT2_LM | CPUID_EXT2_PDPE1GB | CPUID_EXT2_RDTSCP |
+            CPUID_EXT2_NX | CPUID_EXT2_SYSCALL,
+        .features[FEAT_8000_0001_ECX] =
+            CPUID_EXT3_ABM | CPUID_EXT3_LAHF_LM | CPUID_EXT3_3DNOWPREFETCH,
+        .features[FEAT_7_0_EBX] =
+            CPUID_7_0_EBX_FSGSBASE | CPUID_7_0_EBX_BMI1 |
+            CPUID_7_0_EBX_HLE | CPUID_7_0_EBX_AVX2 | CPUID_7_0_EBX_SMEP |
+            CPUID_7_0_EBX_BMI2 | CPUID_7_0_EBX_ERMS | CPUID_7_0_EBX_INVPCID |
+            CPUID_7_0_EBX_RTM | CPUID_7_0_EBX_RDSEED | CPUID_7_0_EBX_ADX |
+            CPUID_7_0_EBX_SMAP | CPUID_7_0_EBX_CLWB |
+            CPUID_7_0_EBX_AVX512F | CPUID_7_0_EBX_AVX512DQ |
+            CPUID_7_0_EBX_AVX512BW | CPUID_7_0_EBX_AVX512CD |
+            CPUID_7_0_EBX_AVX512VL | CPUID_7_0_EBX_CLFLUSHOPT,
+        .features[FEAT_7_0_ECX] =
+            CPUID_7_0_ECX_PKU |
+            CPUID_7_0_ECX_AVX512VNNI,
+        .features[FEAT_7_0_EDX] =
+            CPUID_7_0_EDX_SPEC_CTRL | CPUID_7_0_EDX_SPEC_CTRL_SSBD,
+        /* Missing: XSAVES (not supported by some Linux versions,
+                * including v4.1 to v4.12).
+                * KVM doesn't yet expose any XSAVES state save component,
+                * and the only one defined in Skylake (processor tracing)
+                * probably will block migration anyway.
+                */
+        .features[FEAT_XSAVE] =
+            CPUID_XSAVE_XSAVEOPT | CPUID_XSAVE_XSAVEC |
+            CPUID_XSAVE_XGETBV1,
+        .features[FEAT_6_EAX] =
+            CPUID_6_EAX_ARAT,
+        .xlevel = 0x80000008,
+        .model_id = "Intel Xeon Processor (Cascadelake)",
+    },
+    {
+        .name = "Icelake-Client",
+        .level = 0xd,
+        .vendor = CPUID_VENDOR_INTEL,
+        .family = 6,
+        .model = 126,
+        .stepping = 0,
+        .features[FEAT_1_EDX] =
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
+            CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
+            CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
+            CPUID_DE | CPUID_FP87,
+        .features[FEAT_1_ECX] =
+            CPUID_EXT_AVX | CPUID_EXT_XSAVE | CPUID_EXT_AES |
+            CPUID_EXT_POPCNT | CPUID_EXT_X2APIC | CPUID_EXT_SSE42 |
+            CPUID_EXT_SSE41 | CPUID_EXT_CX16 | CPUID_EXT_SSSE3 |
+            CPUID_EXT_PCLMULQDQ | CPUID_EXT_SSE3 |
+            CPUID_EXT_TSC_DEADLINE_TIMER | CPUID_EXT_FMA | CPUID_EXT_MOVBE |
+            CPUID_EXT_PCID | CPUID_EXT_F16C | CPUID_EXT_RDRAND,
+        .features[FEAT_8000_0001_EDX] =
+            CPUID_EXT2_LM | CPUID_EXT2_RDTSCP | CPUID_EXT2_NX |
+            CPUID_EXT2_SYSCALL,
+        .features[FEAT_8000_0001_ECX] =
+            CPUID_EXT3_ABM | CPUID_EXT3_LAHF_LM | CPUID_EXT3_3DNOWPREFETCH,
+        .features[FEAT_8000_0008_EBX] =
+            CPUID_8000_0008_EBX_WBNOINVD,
+        .features[FEAT_7_0_EBX] =
+            CPUID_7_0_EBX_FSGSBASE | CPUID_7_0_EBX_BMI1 |
+            CPUID_7_0_EBX_HLE | CPUID_7_0_EBX_AVX2 | CPUID_7_0_EBX_SMEP |
+            CPUID_7_0_EBX_BMI2 | CPUID_7_0_EBX_ERMS | CPUID_7_0_EBX_INVPCID |
+            CPUID_7_0_EBX_RTM | CPUID_7_0_EBX_RDSEED | CPUID_7_0_EBX_ADX |
+            CPUID_7_0_EBX_SMAP,
+        .features[FEAT_7_0_ECX] =
+            CPUID_7_0_ECX_VBMI | CPUID_7_0_ECX_UMIP | CPUID_7_0_ECX_PKU |
+            CPUID_7_0_ECX_VBMI2 | CPUID_7_0_ECX_GFNI |
+            CPUID_7_0_ECX_VAES | CPUID_7_0_ECX_VPCLMULQDQ |
+            CPUID_7_0_ECX_AVX512VNNI | CPUID_7_0_ECX_AVX512BITALG |
+            CPUID_7_0_ECX_AVX512_VPOPCNTDQ,
+        .features[FEAT_7_0_EDX] =
+            CPUID_7_0_EDX_SPEC_CTRL | CPUID_7_0_EDX_SPEC_CTRL_SSBD,
+        /* Missing: XSAVES (not supported by some Linux versions,
+                * including v4.1 to v4.12).
+                * KVM doesn't yet expose any XSAVES state save component,
+                * and the only one defined in Skylake (processor tracing)
+                * probably will block migration anyway.
+                */
+        .features[FEAT_XSAVE] =
+            CPUID_XSAVE_XSAVEOPT | CPUID_XSAVE_XSAVEC |
+            CPUID_XSAVE_XGETBV1,
+        .features[FEAT_6_EAX] =
+            CPUID_6_EAX_ARAT,
+        .xlevel = 0x80000008,
+        .model_id = "Intel Core Processor (Icelake)",
+    },
+    {
+        .name = "Icelake-Server",
+        .level = 0xd,
+        .vendor = CPUID_VENDOR_INTEL,
+        .family = 6,
+        .model = 134,
+        .stepping = 0,
+        .features[FEAT_1_EDX] =
+            CPUID_VME | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR | CPUID_MMX |
+            CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV | CPUID_MCA |
+            CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC | CPUID_CX8 |
+            CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC | CPUID_PSE |
+            CPUID_DE | CPUID_FP87,
+        .features[FEAT_1_ECX] =
+            CPUID_EXT_AVX | CPUID_EXT_XSAVE | CPUID_EXT_AES |
+            CPUID_EXT_POPCNT | CPUID_EXT_X2APIC | CPUID_EXT_SSE42 |
+            CPUID_EXT_SSE41 | CPUID_EXT_CX16 | CPUID_EXT_SSSE3 |
+            CPUID_EXT_PCLMULQDQ | CPUID_EXT_SSE3 |
+            CPUID_EXT_TSC_DEADLINE_TIMER | CPUID_EXT_FMA | CPUID_EXT_MOVBE |
+            CPUID_EXT_PCID | CPUID_EXT_F16C | CPUID_EXT_RDRAND,
+        .features[FEAT_8000_0001_EDX] =
+            CPUID_EXT2_LM | CPUID_EXT2_PDPE1GB | CPUID_EXT2_RDTSCP |
+            CPUID_EXT2_NX | CPUID_EXT2_SYSCALL,
+        .features[FEAT_8000_0001_ECX] =
+            CPUID_EXT3_ABM | CPUID_EXT3_LAHF_LM | CPUID_EXT3_3DNOWPREFETCH,
+        .features[FEAT_8000_0008_EBX] =
+            CPUID_8000_0008_EBX_WBNOINVD,
+        .features[FEAT_7_0_EBX] =
+            CPUID_7_0_EBX_FSGSBASE | CPUID_7_0_EBX_BMI1 |
+            CPUID_7_0_EBX_HLE | CPUID_7_0_EBX_AVX2 | CPUID_7_0_EBX_SMEP |
+            CPUID_7_0_EBX_BMI2 | CPUID_7_0_EBX_ERMS | CPUID_7_0_EBX_INVPCID |
+            CPUID_7_0_EBX_RTM | CPUID_7_0_EBX_RDSEED | CPUID_7_0_EBX_ADX |
+            CPUID_7_0_EBX_SMAP | CPUID_7_0_EBX_CLWB |
+            CPUID_7_0_EBX_AVX512F | CPUID_7_0_EBX_AVX512DQ |
+            CPUID_7_0_EBX_AVX512BW | CPUID_7_0_EBX_AVX512CD |
+            CPUID_7_0_EBX_AVX512VL | CPUID_7_0_EBX_CLFLUSHOPT,
+        .features[FEAT_7_0_ECX] =
+            CPUID_7_0_ECX_VBMI | CPUID_7_0_ECX_UMIP | CPUID_7_0_ECX_PKU |
+            CPUID_7_0_ECX_VBMI2 | CPUID_7_0_ECX_GFNI |
+            CPUID_7_0_ECX_VAES | CPUID_7_0_ECX_VPCLMULQDQ |
+            CPUID_7_0_ECX_AVX512VNNI | CPUID_7_0_ECX_AVX512BITALG |
+            CPUID_7_0_ECX_AVX512_VPOPCNTDQ | CPUID_7_0_ECX_LA57,
+        .features[FEAT_7_0_EDX] =
+            CPUID_7_0_EDX_PCONFIG | CPUID_7_0_EDX_SPEC_CTRL |
+            CPUID_7_0_EDX_SPEC_CTRL_SSBD,
+        /* Missing: XSAVES (not supported by some Linux versions,
+                * including v4.1 to v4.12).
+                * KVM doesn't yet expose any XSAVES state save component,
+                * and the only one defined in Skylake (processor tracing)
+                * probably will block migration anyway.
+                */
+        .features[FEAT_XSAVE] =
+            CPUID_XSAVE_XSAVEOPT | CPUID_XSAVE_XSAVEC |
+            CPUID_XSAVE_XGETBV1,
+        .features[FEAT_6_EAX] =
+            CPUID_6_EAX_ARAT,
+        .xlevel = 0x80000008,
+        .model_id = "Intel Xeon Processor (Icelake)",
+    },
+    {
+        .name = "KnightsMill",
+        .level = 0xd,
+        .vendor = CPUID_VENDOR_INTEL,
+        .family = 6,
+        .model = 133,
+        .stepping = 0,
+        .features[FEAT_1_EDX] =
+            CPUID_VME | CPUID_SS | CPUID_SSE2 | CPUID_SSE | CPUID_FXSR |
+            CPUID_MMX | CPUID_CLFLUSH | CPUID_PSE36 | CPUID_PAT | CPUID_CMOV |
+            CPUID_MCA | CPUID_PGE | CPUID_MTRR | CPUID_SEP | CPUID_APIC |
+            CPUID_CX8 | CPUID_MCE | CPUID_PAE | CPUID_MSR | CPUID_TSC |
+            CPUID_PSE | CPUID_DE | CPUID_FP87,
+        .features[FEAT_1_ECX] =
+            CPUID_EXT_AVX | CPUID_EXT_XSAVE | CPUID_EXT_AES |
+            CPUID_EXT_POPCNT | CPUID_EXT_X2APIC | CPUID_EXT_SSE42 |
+            CPUID_EXT_SSE41 | CPUID_EXT_CX16 | CPUID_EXT_SSSE3 |
+            CPUID_EXT_PCLMULQDQ | CPUID_EXT_SSE3 |
+            CPUID_EXT_TSC_DEADLINE_TIMER | CPUID_EXT_FMA | CPUID_EXT_MOVBE |
+            CPUID_EXT_F16C | CPUID_EXT_RDRAND,
+        .features[FEAT_8000_0001_EDX] =
+            CPUID_EXT2_LM | CPUID_EXT2_PDPE1GB | CPUID_EXT2_RDTSCP |
+            CPUID_EXT2_NX | CPUID_EXT2_SYSCALL,
+        .features[FEAT_8000_0001_ECX] =
+            CPUID_EXT3_ABM | CPUID_EXT3_LAHF_LM | CPUID_EXT3_3DNOWPREFETCH,
+        .features[FEAT_7_0_EBX] =
+            CPUID_7_0_EBX_FSGSBASE | CPUID_7_0_EBX_BMI1 | CPUID_7_0_EBX_AVX2 |
+            CPUID_7_0_EBX_SMEP | CPUID_7_0_EBX_BMI2 | CPUID_7_0_EBX_ERMS |
+            CPUID_7_0_EBX_RDSEED | CPUID_7_0_EBX_ADX | CPUID_7_0_EBX_AVX512F |
+            CPUID_7_0_EBX_AVX512CD | CPUID_7_0_EBX_AVX512PF |
+            CPUID_7_0_EBX_AVX512ER,
+        .features[FEAT_7_0_ECX] =
+            CPUID_7_0_ECX_AVX512_VPOPCNTDQ,
+        .features[FEAT_7_0_EDX] =
+            CPUID_7_0_EDX_AVX512_4VNNIW | CPUID_7_0_EDX_AVX512_4FMAPS,
+        .features[FEAT_XSAVE] =
+            CPUID_XSAVE_XSAVEOPT,
+        .features[FEAT_6_EAX] =
+            CPUID_6_EAX_ARAT,
+        .xlevel = 0x80000008,
+        .model_id = "Intel Xeon Phi Processor (Knights Mill)",
     },
     {
         .name = "Opteron_G1",
@@ -2266,21 +2546,41 @@ static const TypeInfo host_x86_cpu_type_info = {
 
 #endif
 
+static char *feature_word_description(FeatureWordInfo *f, uint32_t bit)
+{
+    assert(f->type == CPUID_FEATURE_WORD || f->type == MSR_FEATURE_WORD);
+
+    switch (f->type) {
+    case CPUID_FEATURE_WORD:
+        {
+            const char *reg = get_register_name_32(f->cpuid.reg);
+            assert(reg);
+            return g_strdup_printf("CPUID.%02XH:%s",
+                                   f->cpuid.eax, reg);
+        }
+    case MSR_FEATURE_WORD:
+        return g_strdup_printf("MSR(%02XH)",
+                               f->msr.index);
+    }
+
+    return NULL;
+}
+
 static void report_unavailable_features(FeatureWord w, uint32_t mask)
 {
     FeatureWordInfo *f = &feature_word_info[w];
     int i;
+    char *feat_word_str;
 
     for (i = 0; i < 32; ++i) {
         if ((1UL << i) & mask) {
-            const char *reg = get_register_name_32(f->cpuid_reg);
-            assert(reg);
-            warn_report("%s doesn't support requested feature: "
-                        "CPUID.%02XH:%s%s%s [bit %d]",
+            feat_word_str = feature_word_description(f, i);
+            warn_report("%s doesn't support requested feature: %s%s%s [bit %d]",
                         accel_uses_host_cpuid() ? "host" : "TCG",
-                        f->cpuid_eax, reg,
+                        feat_word_str,
                         f->feat_names[i] ? "." : "",
                         f->feat_names[i] ? f->feat_names[i] : "", i);
+            g_free(feat_word_str);
         }
     }
 }
@@ -2524,11 +2824,18 @@ static void x86_cpu_get_feature_words(Object *obj, Visitor *v,
 
     for (w = 0; w < FEATURE_WORDS; w++) {
         FeatureWordInfo *wi = &feature_word_info[w];
+        /*
+                * We didn't have MSR features when "feature-words" was
+                *  introduced. Therefore skipped other type entries.
+                */
+        if (wi->type != CPUID_FEATURE_WORD) {
+            continue;
+        }
         X86CPUFeatureWordInfo *qwi = &word_infos[w];
-        qwi->cpuid_input_eax = wi->cpuid_eax;
-        qwi->has_cpuid_input_ecx = wi->cpuid_needs_ecx;
-        qwi->cpuid_input_ecx = wi->cpuid_ecx;
-        qwi->cpuid_register = x86_reg_info_32[wi->cpuid_reg].qapi_enum;
+        qwi->cpuid_input_eax = wi->cpuid.eax;
+        qwi->has_cpuid_input_ecx = wi->cpuid.needs_ecx;
+        qwi->cpuid_input_ecx = wi->cpuid.ecx;
+        qwi->cpuid_register = x86_reg_info_32[wi->cpuid.reg].qapi_enum;
         qwi->features = array[w];
 
         /* List will be in reverse order, but order shouldn't matter */
@@ -2884,16 +3191,27 @@ static uint32_t x86_cpu_get_supported_feature_word(FeatureWord w,
                                                    bool migratable_only)
 {
     FeatureWordInfo *wi = &feature_word_info[w];
-    uint32_t r;
+    uint32_t r = 0;
 
     if (kvm_enabled()) {
-        r = kvm_arch_get_supported_cpuid(kvm_state, wi->cpuid_eax,
-                                                    wi->cpuid_ecx,
-                                                    wi->cpuid_reg);
+        switch (wi->type) {
+        case CPUID_FEATURE_WORD:
+            r = kvm_arch_get_supported_cpuid(kvm_state, wi->cpuid.eax,
+                                                        wi->cpuid.ecx,
+                                                        wi->cpuid.reg);
+            break;
+        case MSR_FEATURE_WORD:
+            r = kvm_arch_get_supported_msr_feature(kvm_state,
+                        wi->msr.index);
+            break;
+        }
     } else if (hvf_enabled()) {
-        r = hvf_get_supported_cpuid(wi->cpuid_eax,
-                                    wi->cpuid_ecx,
-                                    wi->cpuid_reg);
+        if (wi->type != CPUID_FEATURE_WORD) {
+            return 0;
+        }
+        r = hvf_get_supported_cpuid(wi->cpuid.eax,
+                                    wi->cpuid.ecx,
+                                    wi->cpuid.reg);
     } else if (tcg_enabled()) {
         r = wi->tcg_features;
     } else {
@@ -3382,11 +3700,11 @@ void cpu_x86_cpuid(CPUX86State *env, uint32_t index, uint32_t count,
         }
         break;
     case 5:
-        /* mwait info: needed for Core compatibility */
-        *eax = 0; /* Smallest monitor-line size in bytes */
-        *ebx = 0; /* Largest monitor-line size in bytes */
-        *ecx = CPUID_MWAIT_EMX | CPUID_MWAIT_IBE;
-        *edx = 0;
+        /* MONITOR/MWAIT Leaf */
+        *eax = cpu->mwait.eax; /* Smallest monitor-line size in bytes */
+        *ebx = cpu->mwait.ebx; /* Largest monitor-line size in bytes */
+        *ecx = cpu->mwait.ecx; /* flags */
+        *edx = cpu->mwait.edx; /* mwait substates */
         break;
     case 6:
         /* Thermal and Power Leaf */
@@ -3967,9 +4285,10 @@ static void x86_cpu_adjust_feat_level(X86CPU *cpu, FeatureWord w)
 {
     CPUX86State *env = &cpu->env;
     FeatureWordInfo *fi = &feature_word_info[w];
-    uint32_t eax = fi->cpuid_eax;
+    uint32_t eax = fi->cpuid.eax;
     uint32_t region = eax & 0xF0000000;
 
+    assert(feature_word_info[w].type == CPUID_FEATURE_WORD);
     if (!env->features[w]) {
         return;
     }
@@ -4208,12 +4527,24 @@ static void x86_cpu_realizefn(DeviceState *dev, Error **errp)
     Error *local_err = NULL;
     static bool ht_warned;
 
-    if (xcc->host_cpuid_required && !accel_uses_host_cpuid()) {
-        char *name = x86_cpu_class_get_model_name(xcc);
-        error_setg(&local_err, "CPU model '%s' requires KVM", name);
-        g_free(name);
-        goto out;
+    if (xcc->host_cpuid_required) {
+        if (!accel_uses_host_cpuid()) {
+            char *name = x86_cpu_class_get_model_name(xcc);
+            error_setg(&local_err, "CPU model '%s' requires KVM", name);
+            g_free(name);
+            goto out;
+        }
+
+        if (enable_cpu_pm) {
+            host_cpuid(5, 0, &cpu->mwait.eax, &cpu->mwait.ebx,
+                       &cpu->mwait.ecx, &cpu->mwait.edx);
+            env->features[FEAT_1_ECX] |= CPUID_EXT_MONITOR;
+        }
     }
+
+    /* mwait extended info: needed for Core compatibility */
+    /* We always wake on interrupt even if host does not have the capability */
+    cpu->mwait.ecx |= CPUID_MWAIT_EMX | CPUID_MWAIT_IBE;
 
     if (cpu->apic_id == UNASSIGNED_APIC_ID) {
         error_setg(errp, "apic-id property was not initialized properly");

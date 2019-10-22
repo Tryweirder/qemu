@@ -1,0 +1,240 @@
+# -*- Mode: Python -*-
+#
+
+##
+# == Yandex cloud specific commands
+##
+
+{ 'include': 'block-core.json' }
+
+##
+# @query-device-blockstats:
+#
+# Query the @BlockStats for the specified virtual block device.
+#
+# @device: block device name
+#
+# Returns: block device stats
+#
+# Since: 2.12
+##
+{ 'command': 'query-device-blockstats',
+  'data': { 'device': 'str' },
+  'returns': 'BlockDeviceStats' }
+
+##
+# @BlockTraceType:
+#
+# Block trace operation type.
+#
+# Since: 2.12
+##
+{ 'enum': 'BlockTraceType', 'data': [ 'read', 'write', 'flush' ] }
+
+##
+# @BlockTracePercentile:
+#
+# @percentile: percentile
+#
+# @latency: latency
+#
+# Since: 2.12
+##
+{ 'struct': 'BlockTracePercentile',
+  'data': { 'percentile': 'int', 'latency': 'uint64' } }
+
+##
+# @BlockTraceInfo:
+#
+# @count: count of trace entries
+#
+# @type: type of io operation
+#
+# @size: total size of all trace entries
+#
+# @latency: total latency of all trace entries
+#
+# @percentiles: list of percentile
+#
+# Since: 2.12
+##
+{ 'struct': 'BlockTraceInfo',
+  'data': { 'count': 'uint32', 'type': 'BlockTraceType',
+            'size': 'uint64', 'latency': 'uint64',
+            'percentiles': ['BlockTracePercentile'] } }
+
+##
+# @start-block-trace:
+#
+# Start block trace for specified device.
+#
+# @device: block device name.
+#
+# @capacity: max trace entries count
+#
+# Returns: error if device is not found or trace is already started.
+#
+# Since: 2.12
+##
+{ 'command': 'start-block-trace',
+  'data': { 'device': 'str', 'capacity': 'uint32' } }
+
+##
+# @stop-block-trace:
+#
+# Stop block trace for specified device.
+#
+# @device: block device name.
+#
+# Returns: list of trace info by operation type
+#
+# Since: 2.12
+##
+{ 'command': 'stop-block-trace',
+  'data': { 'device': 'str' },
+  'returns': ['BlockTraceInfo'] }
+
+##
+# @start-pluggable-trace:
+#
+# Start block trace for specified device.
+#
+# @device: block device name.
+#
+# @capacity: max trace entries count
+#
+# Returns: error if device is not found or trace is already started.
+#
+# Since: 2.12
+##
+{ 'command': 'start-pluggable-trace',
+  'data': { 'device': 'str', 'capacity': 'uint32' } }
+
+##
+# @stop-pluggable-trace:
+#
+# Stop block trace for specified device.
+#
+# @device: block device name.
+#
+# Returns: list of trace info by operation type
+#
+# Since: 2.12
+##
+{ 'command': 'stop-pluggable-trace',
+  'data': { 'device': 'str' },
+  'returns': ['BlockTraceInfo'] }
+
+##
+# @NbsDriveInfo:
+#
+# @node-name: qemu block node name for this drive
+#
+# @volume-id: NBS volume id
+#
+# Since: 2.12
+##
+{ 'struct': 'NbsDriveInfo',
+  'data': {
+      'node-name': 'str',
+      'volume-id': 'str'
+  }
+}
+
+##
+# @query-nbs-drive:
+#
+# Get NBS drive information
+#
+# @device: NBS drive device name or block node name
+#
+# Returns: @NbsDriveInfo
+#
+# Since: 2.12
+##
+{ 'command': 'query-nbs-drive',
+  'data': { 'device': 'str' },
+  'returns': 'NbsDriveInfo' }
+
+##
+# @query-nbs-drives:
+#
+# Get information about all active NBS drives
+#
+# Returns: array of @NbsDriveInfo
+#
+# Since: 2.12
+##
+{ 'command': 'query-nbs-drives',
+  'returns': ['NbsDriveInfo'] }
+
+##
+# @NbsClientCounters:
+#
+# @counters: serialized dynamic counters
+#
+# Since: 2.12
+##
+{ 'struct': 'NbsClientCounters',
+  'data': { 'counters': 'str' } }
+
+##
+# @query-nbs-client-counters:
+#
+# Get NBS client dynamic counters.
+#
+# Returns: @NbsClientCounters or empty if there are no NBS drives connected at all
+#
+# Since: 2.12
+##
+{ 'command': 'query-nbs-client-counters',
+  'returns': 'NbsClientCounters' }
+
+##
+# @ZeropageScanInfo:
+#
+# @enabled: true if zeropage scanner is active
+#
+# @discarded_size: how many bytes zeropage scanner has discarded
+#                  or -1 if it hasn't discarded yet
+#
+# Since: 2.12
+##
+{ 'struct': 'ZeropageScanInfo',
+  'data': { 'enabled': 'bool', 'discarded_size': 'int64' } }
+
+##
+# @query-zeropage-scan:
+#
+# Get information about zeropage scanner.
+#
+# Returns: @ZeropageScanInfo
+#
+# Since: 2.12
+##
+{ 'command': 'query-zeropage-scan',
+  'returns': 'ZeropageScanInfo' }
+
+##
+# @set-nbs-fail-writes:
+#
+# @device: NBS drive device name or block node name
+#
+# @enable: true - fail write requests, false - don't fail write requests
+#
+# Since: 2.12
+##
+{ 'command': 'set-nbs-fail-writes',
+  'data': { 'device': 'str', 'enable': 'bool' } }
+
+##
+# @set-nbs-fail-reads:
+#
+# @device: NBS drive device name or block node name
+#
+# @enable: true - fail read requests, false - don't fail read requests
+#
+# Since: 2.12
+##
+{ 'command': 'set-nbs-fail-reads',
+  'data': { 'device': 'str', 'enable': 'bool' } }

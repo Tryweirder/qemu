@@ -74,6 +74,17 @@ QTestState *qtest_init_without_qmp_handshake(bool use_oob,
 void qtest_quit(QTestState *s);
 
 /**
+ * qtest_try_negative_testing
+ * @extra_args: other arguments to pass to QEMU.
+ *
+ * Start QEMU VM with the wrong arguments. The exit status will be
+ * used to analyze the reason for each case.
+ *
+ * Returns: status of the killed child process
+ */
+int qtest_try_negative_testing(const char *extra_args);
+
+/**
  * qtest_qmp_discard_response:
  * @s: #QTestState instance to operate on.
  * @fmt...: QMP message to send to qemu
@@ -81,6 +92,18 @@ void qtest_quit(QTestState *s);
  * Sends a QMP message to QEMU and consumes the response.
  */
 void qtest_qmp_discard_response(QTestState *s, const char *fmt, ...);
+
+/**
+ * qtest_qmp_fds:
+ * @s: #QTestState instance to operate on.
+ * @fds: array of file descriptors
+ * @fds_num: number of elements in @fds
+ * @fmt...: QMP message to send to qemu
+ *
+ * Sends a QMP message to QEMU with fds and returns the response.
+ */
+QDict *qtest_qmp_fds(QTestState *s, int *fds, size_t fds_num,
+                     const char *fmt, ...);
 
 /**
  * qtest_qmp:
@@ -111,6 +134,19 @@ void qtest_async_qmp(QTestState *s, const char *fmt, ...);
 void qtest_qmpv_discard_response(QTestState *s, const char *fmt, va_list ap);
 
 /**
+ * qtest_qmp_fdsv:
+ * @s: #QTestState instance to operate on.
+ * @fds: array of file descriptors
+ * @fds_num: number of elements in @fds
+ * @fmt: QMP message to send to QEMU
+ * @ap: QMP message arguments
+ *
+ * Sends a QMP message to QEMU with fds and returns the response.
+ */
+QDict *qtest_qmp_fdsv(QTestState *s, int *fds, size_t fds_num,
+                      const char *fmt, va_list ap);
+
+/**
  * qtest_qmpv:
  * @s: #QTestState instance to operate on.
  * @fmt: QMP message to send to QEMU
@@ -119,6 +155,19 @@ void qtest_qmpv_discard_response(QTestState *s, const char *fmt, va_list ap);
  * Sends a QMP message to QEMU and returns the response.
  */
 QDict *qtest_qmpv(QTestState *s, const char *fmt, va_list ap);
+
+/**
+ * qtest_async_qmp_fdsv:
+ * @s: #QTestState instance to operate on.
+ * @fds: array of file descriptors
+ * @fds_num: number of elements in @fds
+ * @fmt: QMP message to send to QEMU
+ * @ap: QMP message arguments
+ *
+ * Sends a QMP message to QEMU with fds and leaves the response in the stream.
+ */
+void qtest_async_qmp_fdsv(QTestState *s, int *fds, size_t fds_num,
+                          const char *fmt, va_list ap);
 
 /**
  * qtest_async_qmpv:
@@ -560,6 +609,13 @@ static inline void qtest_end(void)
 }
 
 /**
+ * qtest_qemu_pid:
+ *
+ * Return qtest pid of the qemu process.
+ */
+int qtest_qemu_pid(QTestState *qstate);
+
+/**
  * qmp:
  * @fmt...: QMP message to send to qemu
  *
@@ -940,6 +996,8 @@ static inline int64_t clock_set(int64_t val)
 }
 
 QDict *qmp_fd_receive(int fd);
+void qmp_fd_send_fdsv(int fd, int *fds, size_t fds_num,
+                      const char *fmt, va_list ap);
 void qmp_fd_sendv(int fd, const char *fmt, va_list ap);
 void qmp_fd_send(int fd, const char *fmt, ...);
 QDict *qmp_fdv(int fd, const char *fmt, va_list ap);
@@ -952,6 +1010,30 @@ QDict *qmp_fd(int fd, const char *fmt, ...);
  *  Call a callback function for every name of all available machines.
  */
 void qtest_cb_for_every_machine(void (*cb)(const char *machine));
+
+/**
+ * Get default running machine type name
+ *
+ * Returns: default machine type alias (i.e. q35, pc, etc)
+ *          Caller should free returned string with g_free
+ */
+const char *qtest_get_default_machine_type(void);
+
+/**
+ * Check if machine type name is supported
+ * @machine Machine type name or alias to check
+ *
+ * Returns: true if machine with this name or alias is supported, false if not
+ */
+bool qtest_is_supported_machine_type(const char *machine);
+
+/**
+ * qtest_is_device_supported:
+ * @type: Device type to check support for
+ *
+ * Returns: True if device is supported, false if not
+ */
+bool qtest_is_device_supported(const char *type);
 
 /**
  * qtest_qmp_device_add:

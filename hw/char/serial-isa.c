@@ -42,8 +42,9 @@ typedef struct ISASerialState {
 static const int isa_serial_io[MAX_SERIAL_PORTS] = {
     0x3f8, 0x2f8, 0x3e8, 0x2e8
 };
-static const int isa_serial_irq[MAX_SERIAL_PORTS] = {
-    4, 3, 4, 3
+/* Use irq 6 and 7 for com3/4 because Windows doesn't want to share 3 and 4 */
+const int isa_serial_irq[MAX_SERIAL_PORTS] = {
+    4, 3, 6, 7
 };
 
 static void serial_isa_realizefn(DeviceState *dev, Error **errp)

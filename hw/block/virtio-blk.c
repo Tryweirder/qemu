@@ -872,6 +872,17 @@ static int virtio_blk_load_device(VirtIODevice *vdev, QEMUFile *f,
                                   int version_id)
 {
     VirtIOBlock *s = VIRTIO_BLK(vdev);
+    uint64_t blk_nb_sectors, virtio_nb_sectors;
+    struct virtio_blk_config *config = vdev->config;
+
+    virtio_nb_sectors = virtio_ldq_p(vdev, &config->capacity);
+    blk_get_geometry(s->blk, &blk_nb_sectors);
+    if (blk_nb_sectors != virtio_nb_sectors) {
+        /* FIXME: Fail migration */
+        warn_report("Disk size inconsistency: virtio-blk disk size %" PRIu64
+                    " != block backend size %" PRIu64,
+                    virtio_nb_sectors, blk_nb_sectors);
+    }
 
     while (qemu_get_sbyte(f)) {
         unsigned nvqs = s->conf.num_queues;
@@ -978,6 +989,12 @@ static void virtio_blk_device_realize(DeviceState *dev, Error **errp)
     blk_set_guest_block_size(s->blk, s->conf.conf.logical_block_size);
 
     blk_iostatus_enable(s->blk);
+
+    /*
+     * Fill vdev->config in advance, because we need it to be valid
+     * for the disk size consistency check during migration.
+     */
+    virtio_blk_update_config(vdev, vdev->config);
 }
 
 static void virtio_blk_device_unrealize(DeviceState *dev, Error **errp)

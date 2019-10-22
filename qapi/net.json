@@ -689,3 +689,134 @@
 ##
 { 'event': 'NIC_RX_FILTER_CHANGED',
   'data': { '*name': 'str', 'path': 'str' } }
+
+##
+# @x-net-latency-histogram-set:
+#
+# Manage tx and rx latency histograms for network device.
+#
+# If only @device parameter is specified, remove all present latency histograms
+# for the device. Otherwise, add/reset some of (or all) latency histograms.
+#
+# @device: device name to set latency histogram for.
+#
+# @boundaries: list of interval boundary values (see description in
+#              LatencyHistogramInfo definition). If specified, all
+#              latency histograms are removed, and empty ones created for all
+#              io types with intervals corresponding to @boundaries (except for
+#              io types, for which specific boundaries are set through the
+#              following parameters).
+#
+# @boundaries-rx: list of interval boundary values for rx latency
+#                 histogram. If specified, old rx latency histogram is
+#                 removed, and empty one created with intervals
+#                 corresponding to @boundaries-rx. The parameter has higher
+#                 priority than @boundaries.
+#
+# @boundaries-tx: list of interval boundary values for tx latency
+#                 histogram. If specified, old tx latency histogram is
+#                 removed, and empty one created with intervals
+#                 corresponding to @boundaries-tx. The parameter has higher
+#                 priority than @boundaries.
+#
+# Returns: error if device is not found or any boundary arrays are invalid.
+#
+# Since: 2.12
+#
+# Example: set new histograms for all io types with intervals
+# [0, 10), [10, 50), [50, 100), [100, +inf):
+#
+# -> { "execute": "x-net-latency-histogram-set",
+#      "arguments": { "device": "net0",
+#                     "boundaries": [10, 50, 100] } }
+# <- { "return": {} }
+#
+# Example: set new histogram only for tx, other histograms will remain
+# not changed (or not created):
+#
+# -> { "execute": "x-net-latency-histogram-set",
+#      "arguments": { "device": "net0",
+#                     "boundaries-tx": [10, 50, 100] } }
+# <- { "return": {} }
+#
+# Example: remove all latency histograms:
+#
+# -> { "execute": "x-net-latency-histogram-set",
+#      "arguments": { "device": "net0" } }
+# <- { "return": {} }
+##
+{ 'command': 'x-net-latency-histogram-set',
+  'data': {'device': 'str',
+           '*boundaries': ['uint64'],
+           '*boundaries-rx': ['uint64'],
+           '*boundaries-tx': ['uint64'] } }
+
+##
+# @NetQueueStats:
+#
+# Statistics of a virtual network device queue
+#
+# @tx_bytes:      The number of bytes sent by the device.
+# @rx_bytes:      The number of bytes received by the device.
+#
+# @tx_operations: The number of successfull tx operations performed by the device.
+# @rx_operations: The number of successfull rx operations performed by the device.
+#
+# @tx_in_flight_operations: The number of in flight tx operations performed
+#                           by the device
+# @rx_in_flight_operations: The number of in flight rx operations performed
+#                           by the device
+#
+# @tx_failed_operations: The number of failed rx operations
+#                        performed by the device
+# @rx_failed_operations: The number of failed rx operations
+#                        performed by the device
+#
+# @tx_dropped_operations: The number of dropped rx operations
+#                         performed by the device
+# @rx_dropped_operations: The number of failed rx operations
+#                         performed by the device
+#
+# @tx_latency_histogram: @LatencyHistogramInfo.
+# @rx_latency_histogram: @LatencyHistogramInfo.
+#
+# Since: 2.12.0-23
+##
+{ 'struct': 'NetQueueStats',
+  'data': {
+      'tx_bytes': 'int', 'rx_bytes': 'int',
+      'tx_operations': 'int', 'rx_operations': 'int',
+      'tx_in_flight_operations': 'int', 'rx_in_flight_operations': 'int',
+      'tx_failed_operations': 'int', 'rx_failed_operations': 'int',
+      'tx_dropped_operations': 'int', 'rx_dropped_operations': 'int',
+      '*tx_latency_histogram': 'LatencyHistogramInfo',
+      '*rx_latency_histogram': 'LatencyHistogramInfo' } }
+
+##
+# @NetDeviceStats:
+#
+# Statistics of a virtual network device for all its queues
+#
+# @device: If the stats are for a virtual device device, the name
+#          corresponding to the virtual network device
+#
+# @stats:  A per-queue @NetQueueStats for the device, indexed by queue number
+#
+# Since: 2.12.0
+##
+{ 'struct': 'NetDeviceStats',
+  'data': {'device': 'str',
+           'stats': 'NetQueueStats' } }
+
+##
+# @x-query-netstats:
+#
+# Query per-queue @NetDeviceStats for all virtual network devices.
+#
+# Returns: A list of per-queue @NetDeviceStats for each virtual network device.
+#
+# Since: 2.12.0
+##
+{ 'command': 'x-query-netstats',
+  'data': { },
+  'returns': ['NetDeviceStats'] }

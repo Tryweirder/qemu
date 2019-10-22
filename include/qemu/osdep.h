@@ -546,4 +546,11 @@ extern intptr_t qemu_real_host_page_mask;
 extern int qemu_icache_linesize;
 extern int qemu_dcache_linesize;
 
+/**
+ * qemu_secure_zero_memory
+ *
+ * Overwrite a given buffer with zeroes avoiding any compiler optimizations
+ */
+void qemu_secure_zero_memory(void *buf, size_t bytes);
+
 #endif

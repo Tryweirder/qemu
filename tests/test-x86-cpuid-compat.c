@@ -80,6 +80,30 @@ static void add_cpuid_test(const char *name, const char *cmdline,
     qtest_add_data_func(name, args, test_cpuid_prop);
 }
 
+static void add_cpuid_test_for_any_machine_type(const char *name_fmt,
+                                                const char *cmdline_fmt,
+                                                const char *property,
+                                                int64_t expected_value,
+                                                ...)
+{
+    const char *machine;
+    va_list machines;
+
+    va_start(machines, expected_value);
+    while ((machine = va_arg(machines, const char*)) != NULL) {
+        if (qtest_is_supported_machine_type(machine)) {
+            /* We don't free those since they are used in test data later */
+            char *name = g_strdup_printf(name_fmt, machine);
+            char *cmdline = g_strdup_printf(cmdline_fmt, machine);
+
+            add_cpuid_test(name, cmdline, property, expected_value);
+            break;
+        }
+    }
+
+    va_end(machines);
+}
+
 
 /* Parameters to a add_feature_test() test case */
 typedef struct FeatureTestArgs {
@@ -309,53 +333,66 @@ int main(int argc, char **argv)
     /* Check compatibility of old machine-types that didn't
      * auto-increase level/xlevel/xlevel2: */
 
-    add_cpuid_test("x86/cpuid/auto-level/pc-2.7",
-                   "-machine pc-i440fx-2.7 -cpu 486,+arat,+avx512vbmi,+xsaveopt",
-                   "level", 1);
-    add_cpuid_test("x86/cpuid/auto-xlevel/pc-2.7",
-                   "-machine pc-i440fx-2.7 -cpu 486,+3dnow,+sse4a,+invtsc,+npt,+svm",
-                   "xlevel", 0);
-    add_cpuid_test("x86/cpuid/auto-xlevel2/pc-2.7",
-                   "-machine pc-i440fx-2.7 -cpu 486,+xstore",
-                   "xlevel2", 0);
+    add_cpuid_test_for_any_machine_type("x86/cpuid/auto-level/%s",
+            "-machine %s -cpu 486,+arat,+avx512vbmi,+xsaveopt",
+            "level", 1,
+            "pc-i440fx-2.7", "pc-q35-2.7", NULL);
+    add_cpuid_test_for_any_machine_type("x86/cpuid/auto-xlevel/%s",
+            "-machine %s -cpu 486,+3dnow,+sse4a,+invtsc,+npt,+svm",
+            "xlevel", 0,
+            "pc-i440fx-2.7", "pc-q35-2.7", NULL);
+    add_cpuid_test_for_any_machine_type("x86/cpuid/auto-xlevel2/%s",
+            "-machine %s -cpu 486,+xstore",
+            "xlevel2", 0,
+            "pc-i440fx-2.7", "pc-q35-2.7", NULL);
+
     /*
      * QEMU 1.4.0 had auto-level enabled for CPUID[7], already,
      * and the compat code that sets default level shouldn't
      * disable the auto-level=7 code:
      */
-    add_cpuid_test("x86/cpuid/auto-level7/pc-i440fx-1.4/off",
-                   "-machine pc-i440fx-1.4 -cpu Nehalem",
-                   "level", 2);
-    add_cpuid_test("x86/cpuid/auto-level7/pc-i440fx-1.5/on",
-                   "-machine pc-i440fx-1.4 -cpu Nehalem,+smap",
-                   "level", 7);
-    add_cpuid_test("x86/cpuid/auto-level7/pc-i440fx-2.3/off",
-                   "-machine pc-i440fx-2.3 -cpu Penryn",
-                   "level", 4);
-    add_cpuid_test("x86/cpuid/auto-level7/pc-i440fx-2.3/on",
-                   "-machine pc-i440fx-2.3 -cpu Penryn,+erms",
-                   "level", 7);
-    add_cpuid_test("x86/cpuid/auto-level7/pc-i440fx-2.9/off",
-                   "-machine pc-i440fx-2.9 -cpu Conroe",
-                   "level", 10);
-    add_cpuid_test("x86/cpuid/auto-level7/pc-i440fx-2.9/on",
-                   "-machine pc-i440fx-2.9 -cpu Conroe,+erms",
-                   "level", 10);
+    add_cpuid_test_for_any_machine_type("x86/cpuid/auto-level7/%s/off",
+            "-machine %s -cpu Nehalem",
+            "level", 2,
+            "pc-i440fx-1.4", "pc-q35-1.4", NULL);
+    add_cpuid_test_for_any_machine_type("x86/cpuid/auto-level7/%s/on",
+            "-machine %s -cpu Nehalem,+smap",
+            "level", 7,
+            "pc-i440fx-1.5", "pc-q35-1.5", NULL);
+    add_cpuid_test_for_any_machine_type("x86/cpuid/auto-level7/%s/off",
+            "-machine %s -cpu Penryn",
+            "level", 4,
+            "pc-i440fx-2.3", "pc-q35-2.3", NULL);
+    add_cpuid_test_for_any_machine_type("x86/cpuid/auto-level7/%s/on",
+            "-machine %s -cpu Penryn,+erms",
+            "level", 7,
+            "pc-i440fx-2.3", "pc-q35-2.3", NULL);
+    add_cpuid_test_for_any_machine_type("x86/cpuid/auto-level7/%s/off",
+            "-machine %s -cpu Conroe",
+            "level", 10,
+            "pc-i440fx-2.9", "pc-q35-2.9", NULL);
+    add_cpuid_test_for_any_machine_type("x86/cpuid/auto-level7/%s/on",
+            "-machine %s -cpu Conroe,+erms",
+            "level", 10,
+            "pc-i440fx-2.9", "pc-q35-2.9", NULL);
 
     /*
      * xlevel doesn't have any feature that triggers auto-level
      * code on old machine-types.  Just check that the compat code
      * is working correctly:
      */
-    add_cpuid_test("x86/cpuid/xlevel-compat/pc-i440fx-2.3",
-                   "-machine pc-i440fx-2.3 -cpu SandyBridge",
-                   "xlevel", 0x8000000a);
-    add_cpuid_test("x86/cpuid/xlevel-compat/pc-i440fx-2.4/npt-off",
-                   "-machine pc-i440fx-2.4 -cpu SandyBridge,",
-                   "xlevel", 0x80000008);
-    add_cpuid_test("x86/cpuid/xlevel-compat/pc-i440fx-2.4/npt-on",
-                   "-machine pc-i440fx-2.4 -cpu SandyBridge,+npt",
-                   "xlevel", 0x80000008);
+    add_cpuid_test_for_any_machine_type("x86/cpuid/xlevel-compat/%s",
+                   "-machine %s -cpu SandyBridge",
+                   "xlevel", 0x8000000a,
+                   "pc-i440fx-2.3", "pc-q35-2.3", NULL);
+    add_cpuid_test_for_any_machine_type("x86/cpuid/xlevel-compat/%s/npt-off",
+                   "-machine %s -cpu SandyBridge,",
+                   "xlevel", 0x80000008,
+                   "pc-i440fx-2.4", "pc-q35-2.4", NULL);
+    add_cpuid_test_for_any_machine_type("x86/cpuid/xlevel-compat/%s/npt-on",
+                   "-machine %s -cpu SandyBridge,+npt",
+                   "xlevel", 0x80000008,
+                   "pc-i440fx-2.4", "pc-q35-2.4", NULL);
 
     /* Test feature parsing */
     add_feature_test("x86/cpuid/features/plus",

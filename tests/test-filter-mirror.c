@@ -24,7 +24,7 @@ static void test_mirror(void)
     char *recv_buf;
     uint32_t size = sizeof(send_buf);
     size = htonl(size);
-    const char *devstr = "e1000";
+    const char *devstr = "virtio-net";
 
     if (g_str_equal(qtest_get_arch(), "s390x")) {
         devstr = "virtio-net-ccw";

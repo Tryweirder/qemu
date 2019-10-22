@@ -31,6 +31,8 @@
 #include <linux/vfio.h>
 #endif
 
+#include "hw/vfio/region-filter.h"
+
 #define ERR_PREFIX "vfio error: %s: "
 #define WARN_PREFIX "vfio warning: %s: "
 
@@ -65,6 +67,7 @@ typedef struct VFIORegion {
     uint32_t nr_mmaps;
     VFIOMmap *mmaps;
     uint8_t nr; /* cache the region number for debug */
+    VFIORegionFilter *filter;
 } VFIORegion;
 
 typedef struct VFIOAddressSpace {

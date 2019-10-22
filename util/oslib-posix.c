@@ -130,7 +130,7 @@ void *qemu_memalign(size_t alignment, size_t size)
 void *qemu_anon_ram_alloc(size_t size, uint64_t *alignment, bool shared)
 {
     size_t align = QEMU_VMALLOC_ALIGN;
-    void *ptr = qemu_ram_mmap(-1, size, align, shared);
+    void *ptr = qemu_ram_mmap(-1, size, align, shared, false);
 
     if (ptr == MAP_FAILED) {
         return NULL;
@@ -624,4 +624,21 @@ void sigaction_invoke(struct sigaction *action,
         si.si_uid = info->ssi_uid;
     }
     action->sa_sigaction(info->ssi_signo, &si, NULL);
+}
+
+void qemu_secure_zero_memory(void *buf, size_t bytes)
+{
+    if (!buf || bytes == 0) {
+        return;
+    }
+
+#ifdef __STDC_LIB_EXT1__
+    memset_s(buf, bytes, 0, bytes); /* since C11 */
+#else
+    /* volatile to avoid any possible optimizations in writing to buf */
+    volatile unsigned char *p = buf;
+    while (bytes--) {
+        *p++ = 0;
+    }
+#endif
 }

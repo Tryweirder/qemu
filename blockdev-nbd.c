@@ -17,6 +17,7 @@
 #include "qapi/qapi-commands-block.h"
 #include "sysemu/sysemu.h"
 #include "block/nbd.h"
+#include "block/nbd-client.h"
 #include "io/channel-socket.h"
 #include "io/net-listener.h"
 
@@ -38,7 +39,7 @@ static void nbd_accept(QIONetListener *listener, QIOChannelSocket *cioc,
     qio_channel_set_name(QIO_CHANNEL(cioc), "nbd-server");
     nbd_client_new(NULL, cioc,
                    nbd_server->tlscreds, NULL,
-                   nbd_blockdev_client_closed);
+                   MAX_NBD_REQUESTS, nbd_blockdev_client_closed);
 }
 
 
@@ -161,7 +162,7 @@ void qmp_nbd_server_add(const char *device, bool has_name, const char *name,
         return;
     }
 
-    on_eject_blk = blk_by_name(device);
+    on_eject_blk = blk_lookup(device);
 
     bs = bdrv_lookup_bs(device, device, errp);
     if (!bs) {

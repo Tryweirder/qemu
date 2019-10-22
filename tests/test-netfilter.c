@@ -184,7 +184,7 @@ int main(int argc, char **argv)
 {
     int ret;
     char *args;
-    const char *devstr = "e1000";
+    const char *devstr = "virtio-net-pci";
 
     if (g_str_equal(qtest_get_arch(), "s390x")) {
         devstr = "virtio-net-ccw";

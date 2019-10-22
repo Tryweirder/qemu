@@ -46,6 +46,8 @@ struct NetPacket {
     unsigned flags;
     int size;
     NetPacketSent *sent_cb;
+    bool pending_acct;
+    NetAcctCookie acct;
     uint8_t data[0];
 };
 
@@ -90,23 +92,45 @@ void qemu_del_net_queue(NetQueue *queue)
     g_free(queue);
 }
 
-static void qemu_net_queue_append(NetQueue *queue,
-                                  NetClientState *sender,
-                                  unsigned flags,
-                                  const uint8_t *buf,
-                                  size_t size,
-                                  NetPacketSent *sent_cb)
+static NetPacket *qemu_net_queue_new_packet(NetClientState *sender,
+                                            unsigned flags,
+                                            size_t size,
+                                            NetPacketSent *sent_cb,
+                                            NetAcctCookie *acct)
 {
     NetPacket *packet;
 
-    if (queue->nq_count >= queue->nq_maxlen && !sent_cb) {
-        return; /* drop if queue full and no callback */
-    }
     packet = g_malloc(sizeof(NetPacket) + size);
     packet->sender = sender;
     packet->flags = flags;
     packet->size = size;
     packet->sent_cb = sent_cb;
+    if (acct) {
+        packet->pending_acct = true;
+        packet->acct = *acct;
+    } else {
+        packet->pending_acct = false;
+    }
+
+    return packet;
+}
+
+static void qemu_net_queue_append(NetQueue *queue,
+                                  NetClientState *sender,
+                                  unsigned flags,
+                                  const uint8_t *buf,
+                                  size_t size,
+                                  NetPacketSent *sent_cb,
+                                  NetAcctCookie *acct)
+{
+    NetPacket *packet;
+
+    if (queue->nq_count >= queue->nq_maxlen && !sent_cb) {
+        net_acct_drop(&sender->stats, acct);
+        return; /* drop if queue full and no callback */
+    }
+
+    packet = qemu_net_queue_new_packet(sender, flags, size, sent_cb, acct);
     memcpy(packet->data, buf, size);
 
     queue->nq_count++;
@@ -118,30 +142,30 @@ void qemu_net_queue_append_iov(NetQueue *queue,
                                unsigned flags,
                                const struct iovec *iov,
                                int iovcnt,
-                               NetPacketSent *sent_cb)
+                               NetPacketSent *sent_cb,
+                               NetAcctCookie *acct)
 {
     NetPacket *packet;
     size_t max_len = 0;
+    uint8_t *pdata;
     int i;
 
     if (queue->nq_count >= queue->nq_maxlen && !sent_cb) {
+        net_acct_drop(&sender->stats, acct);
         return; /* drop if queue full and no callback */
     }
     for (i = 0; i < iovcnt; i++) {
         max_len += iov[i].iov_len;
     }
 
-    packet = g_malloc(sizeof(NetPacket) + max_len);
-    packet->sender = sender;
-    packet->sent_cb = sent_cb;
-    packet->flags = flags;
-    packet->size = 0;
+    packet = qemu_net_queue_new_packet(sender, flags, max_len, sent_cb, acct);
 
+    pdata = packet->data;
     for (i = 0; i < iovcnt; i++) {
         size_t len = iov[i].iov_len;
 
-        memcpy(packet->data + packet->size, iov[i].iov_base, len);
-        packet->size += len;
+        memcpy(pdata, iov[i].iov_base, len);
+        pdata += len;
     }
 
     queue->nq_count++;
@@ -191,15 +215,22 @@ ssize_t qemu_net_queue_send(NetQueue *queue,
 {
     ssize_t ret;
 
+    NetAcctCookie acct;
+    net_acct_start(&sender->stats, &acct);
+
     if (queue->delivering || !qemu_can_send_packet(sender)) {
-        qemu_net_queue_append(queue, sender, flags, data, size, sent_cb);
+        qemu_net_queue_append(queue, sender, flags, data, size, sent_cb, &acct);
         return 0;
     }
 
     ret = qemu_net_queue_deliver(queue, sender, flags, data, size);
     if (ret == 0) {
-        qemu_net_queue_append(queue, sender, flags, data, size, sent_cb);
+        qemu_net_queue_append(queue, sender, flags, data, size, sent_cb, &acct);
         return 0;
+    } else if (ret < 0) {
+        net_acct_fail(&sender->stats, &acct);
+    } else {
+        net_acct_done(&sender->stats, &acct, size);
     }
 
     qemu_net_queue_flush(queue);
@@ -216,20 +247,52 @@ ssize_t qemu_net_queue_send_iov(NetQueue *queue,
 {
     ssize_t ret;
 
+    NetAcctCookie acct;
+    net_acct_start(&sender->stats, &acct);
+
     if (queue->delivering || !qemu_can_send_packet(sender)) {
-        qemu_net_queue_append_iov(queue, sender, flags, iov, iovcnt, sent_cb);
+        qemu_net_queue_append_iov(queue, sender, flags, iov, iovcnt, sent_cb, &acct);
         return 0;
     }
 
     ret = qemu_net_queue_deliver_iov(queue, sender, flags, iov, iovcnt);
     if (ret == 0) {
-        qemu_net_queue_append_iov(queue, sender, flags, iov, iovcnt, sent_cb);
+        qemu_net_queue_append_iov(queue, sender, flags, iov, iovcnt, sent_cb, &acct);
         return 0;
+    } else if (ret < 0) {
+        net_acct_fail(&sender->stats, &acct);
+    } else {
+        net_acct_done(&sender->stats, &acct, ret);
     }
 
     qemu_net_queue_flush(queue);
 
     return ret;
+}
+
+static void account_packet(NetPacket *packet, bool drop)
+{
+    if (!packet->pending_acct) {
+        return;
+    }
+
+    if (drop) {
+        net_acct_drop(&packet->sender->stats, &packet->acct);
+    } else {
+        net_acct_done(&packet->sender->stats, &packet->acct, packet->size);
+    }
+
+    packet->pending_acct = false;
+}
+
+static inline void account_dropped_packet(NetPacket *packet)
+{
+    account_packet(packet, true);
+}
+
+static inline void account_delivered_packet(NetPacket *packet)
+{
+    account_packet(packet, false);
 }
 
 void qemu_net_queue_purge(NetQueue *queue, NetClientState *from)
@@ -240,6 +303,9 @@ void qemu_net_queue_purge(NetQueue *queue, NetClientState *from)
         if (packet->sender == from) {
             QTAILQ_REMOVE(&queue->packets, packet, entry);
             queue->nq_count--;
+
+            account_dropped_packet(packet);
+
             if (packet->sent_cb) {
                 packet->sent_cb(packet->sender, 0);
             }
@@ -268,6 +334,8 @@ bool qemu_net_queue_flush(NetQueue *queue)
             QTAILQ_INSERT_HEAD(&queue->packets, packet, entry);
             return false;
         }
+
+        account_delivered_packet(packet);
 
         if (packet->sent_cb) {
             packet->sent_cb(packet->sender, ret);

@@ -357,13 +357,18 @@
 # @dirty-bitmaps: If enabled, QEMU will migrate named dirty bitmaps.
 #                 (since 2.12)
 #
+# @x-ignore-shared: If enabled, QEMU will not migrate shared memory (since 4.0)
+#
+# @x-validate-uuid: Check whether the UUID is the same on both sides or not.
+#                   (since 5.0)
+#
 # Since: 1.2
 ##
 { 'enum': 'MigrationCapability',
   'data': ['xbzrle', 'rdma-pin-all', 'auto-converge', 'zero-blocks',
            'compress', 'events', 'postcopy-ram', 'x-colo', 'release-ram',
            'block', 'return-path', 'pause-before-switchover', 'x-multifd',
-           'dirty-bitmaps' ] }
+           'dirty-bitmaps', 'x-ignore-shared', 'x-validate-uuid' ] }
 
 ##
 # @MigrationCapabilityStatus:
@@ -450,6 +455,10 @@
 #                          auto-converge detects that migration is not making
 #                          progress. The default value is 10. (Since 2.7)
 #
+# @x-cpu-throttle-force-stop: Force stop the source regardless of the
+#                             downtime-limit when maximal throttling exceeded.
+#                             (Since 5.0)
+#
 # @tls-creds: ID of the 'tls-creds' object that provides credentials for
 #             establishing a TLS connection over the migration data channel.
 #             On the outgoing side of the migration, the credentials must
@@ -494,6 +503,9 @@
 #                     and a power of 2
 #                     (Since 2.11)
 #
+# @max-cpu-throttle: maximum cpu throttle percentage.
+#                    Defaults to 99. (Since 3.1)
+#
 # Since: 2.4
 ##
 { 'enum': 'MigrationParameter',
@@ -502,7 +514,8 @@
            'tls-creds', 'tls-hostname', 'max-bandwidth',
            'downtime-limit', 'x-checkpoint-delay', 'block-incremental',
            'x-multifd-channels', 'x-multifd-page-count',
-           'xbzrle-cache-size' ] }
+           'xbzrle-cache-size', 'max-cpu-throttle',
+           'x-cpu-throttle-force-stop' ] }
 
 ##
 # @MigrateSetParameters:
@@ -520,6 +533,10 @@
 # @cpu-throttle-increment: throttle percentage increase each time
 #                          auto-converge detects that migration is not making
 #                          progress. The default value is 10. (Since 2.7)
+#
+# @x-cpu-throttle-force-stop: Force stop the source regardless of the
+#                             downtime-limit when maximal throttling exceeded.
+#                             (Since 5.0)
 #
 # @tls-creds: ID of the 'tls-creds' object that provides credentials
 #             for establishing a TLS connection over the migration data
@@ -570,6 +587,9 @@
 #                     needs to be a multiple of the target page size
 #                     and a power of 2
 #                     (Since 2.11)
+#
+# @max-cpu-throttle: maximum cpu throttle percentage.
+#                    The default value is 99. (Since 3.1)
 # Since: 2.4
 ##
 # TODO either fuse back into MigrationParameters, or make
@@ -588,7 +608,9 @@
             '*block-incremental': 'bool',
             '*x-multifd-channels': 'int',
             '*x-multifd-page-count': 'int',
-            '*xbzrle-cache-size': 'size' } }
+            '*xbzrle-cache-size': 'size',
+            '*max-cpu-throttle': 'int',
+            '*x-cpu-throttle-force-stop': 'bool' } }
 
 ##
 # @migrate-set-parameters:
@@ -624,6 +646,10 @@
 # @cpu-throttle-increment: throttle percentage increase each time
 #                          auto-converge detects that migration is not making
 #                          progress. (Since 2.7)
+#
+# @x-cpu-throttle-force-stop: Force stop the source regardless of the
+#                             downtime-limit when maximal throttling exceeded.
+#                             (Since 5.0)
 #
 # @tls-creds: ID of the 'tls-creds' object that provides credentials
 #             for establishing a TLS connection over the migration data
@@ -671,6 +697,10 @@
 #                     needs to be a multiple of the target page size
 #                     and a power of 2
 #                     (Since 2.11)
+#
+# @max-cpu-throttle: maximum cpu throttle percentage.
+#                    Defaults to 99.
+#                     (Since 3.1)
 # Since: 2.4
 ##
 { 'struct': 'MigrationParameters',
@@ -687,7 +717,9 @@
             '*block-incremental': 'bool' ,
             '*x-multifd-channels': 'uint8',
             '*x-multifd-page-count': 'uint32',
-            '*xbzrle-cache-size': 'size' } }
+            '*xbzrle-cache-size': 'size',
+            '*max-cpu-throttle':'uint8',
+            '*x-cpu-throttle-force-stop': 'bool' } }
 
 ##
 # @query-migrate-parameters:
@@ -798,6 +830,26 @@
 ##
 { 'event': 'MIGRATION_PASS',
   'data': { 'pass': 'int' } }
+
+##
+# @MIGRATION_THROTTLE:
+#
+# Emitted from the source side of a migration when CPU throttling percentage
+# changes
+#
+# @percentage: A throttle percentage value (100 means force stop,
+#              see x-cpu-throttle-force-stop capability)
+#
+# Since: 2.12.0-24
+#
+# Example:
+#
+# { "timestamp": {"seconds": 1566394846, "microseconds": 552915},
+#   "event": "MIGRATION_THROTTLE", "data": {"percentage": 20} }
+#
+##
+{ 'event': 'MIGRATION_THROTTLE',
+  'data': { 'percentage': 'uint8' } }
 
 ##
 # @COLOMessage:

@@ -127,6 +127,74 @@ void vfio_region_write(void *opaque, hwaddr addr,
         break;
     }
 
+    if (region->filter) {
+
+        VFIORegionFilter *filter = region->filter;
+
+        union {
+            uint8_t byte;
+            uint16_t word;
+            uint32_t dword;
+            uint64_t qword;
+        } filter_buf;
+
+        bool pass = false;
+        bool drop = false;
+
+        /* Filter data is already LE, don't need to convert */
+        switch (size) {
+        case 1:
+            filter_buf.byte = *(uint8_t *)(filter->data + addr);
+            pass = filter_buf.byte == UINT8_MAX;
+            drop = filter_buf.byte == 0;
+            break;
+        case 2:
+            filter_buf.word = *(uint16_t *)(filter->data + addr);
+            pass = filter_buf.word == UINT16_MAX;
+            drop = filter_buf.word == 0;
+            break;
+        case 4:
+            filter_buf.dword = *(uint32_t *)(filter->data + addr);
+            pass = filter_buf.dword == UINT32_MAX;
+            drop = filter_buf.dword == 0;
+            break;
+        case 8:
+            filter_buf.qword = *(uint64_t *)(filter->data + addr);
+            pass = filter_buf.qword == UINT64_MAX;
+            drop = filter_buf.qword == 0;
+            break;
+        default:
+            hw_error("vfio: unsupported write size, %d bytes", size);
+            break;
+        }
+
+        if (pass) {
+            /* Do nothing */
+        } else if (drop || size < 4 || (addr & (size - 1))) {
+            /* Drop write */
+            ++filter->writes_dropped;
+            trace_vfio_region_write_dropped(vbasedev->name, region->nr, addr, data,
+                                            size);
+
+            goto complete_write;
+        } else if (!drop) {
+            ++filter->writes_filtered;
+            trace_vfio_region_write_filtered(vbasedev->name, region->nr, addr, data,
+                                             size);
+
+            /* Read from device, data will be in LE */
+            uint64_t dev_data;
+            if (pread(vbasedev->fd, &dev_data, size, region->fd_offset + addr) != size) {
+                error_report("%s(%s:region%d+0x%"HWADDR_PRIx", %d) dev read failed: %m",
+                             __func__, vbasedev->name, region->nr,
+                             addr, size);
+                goto complete_write;
+            }
+
+            buf.qword = (dev_data & ~filter_buf.qword) | (buf.qword & filter_buf.qword);
+        }
+    }
+
     if (pwrite(vbasedev->fd, &buf, size, region->fd_offset + addr) != size) {
         error_report("%s(%s:region%d+0x%"HWADDR_PRIx", 0x%"PRIx64
                      ",%d) failed: %m",
@@ -136,6 +204,7 @@ void vfio_region_write(void *opaque, hwaddr addr,
 
     trace_vfio_region_write(vbasedev->name, region->nr, addr, data, size);
 
+complete_write:
     /*
      * A read or write to a BAR always signals an INTx EOI.  This will
      * do nothing if not pending (including not in INTx mode).  We assume
@@ -209,8 +278,8 @@ const MemoryRegionOps vfio_region_ops = {
 /*
  * DMA - Mapping and unmapping for the "type1" IOMMU interface used on x86
  */
-static int vfio_dma_unmap(VFIOContainer *container,
-                          hwaddr iova, ram_addr_t size)
+static int vfio_dma_do_unmap(VFIOContainer *container,
+                             hwaddr iova, ram_addr_t size)
 {
     struct vfio_iommu_type1_dma_unmap unmap = {
         .argsz = sizeof(unmap),
@@ -227,8 +296,19 @@ static int vfio_dma_unmap(VFIOContainer *container,
     return 0;
 }
 
+static int vfio_dma_unmap(VFIOContainer *container,
+                          hwaddr iova, ram_addr_t size, MemoryRegion *mr)
+{
+    if (memory_region_is_ram(mr)) {
+        qemu_ram_dma_decref(mr->ram_block);
+    }
+
+    return vfio_dma_do_unmap(container, iova, size);
+}
+
 static int vfio_dma_map(VFIOContainer *container, hwaddr iova,
-                        ram_addr_t size, void *vaddr, bool readonly)
+                        ram_addr_t size, void *vaddr, bool readonly,
+                        MemoryRegion *mr)
 {
     struct vfio_iommu_type1_dma_map map = {
         .argsz = sizeof(map),
@@ -248,8 +328,13 @@ static int vfio_dma_map(VFIOContainer *container, hwaddr iova,
      * the VGA ROM space.
      */
     if (ioctl(container->fd, VFIO_IOMMU_MAP_DMA, &map) == 0 ||
-        (errno == EBUSY && vfio_dma_unmap(container, iova, size) == 0 &&
+        (errno == EBUSY && vfio_dma_do_unmap(container, iova, size) == 0 &&
          ioctl(container->fd, VFIO_IOMMU_MAP_DMA, &map) == 0)) {
+
+        if (memory_region_is_ram(mr)) {
+            qemu_ram_dma_addref(mr->ram_block);
+        }
+
         return 0;
     }
 
@@ -309,8 +394,8 @@ static bool vfio_listener_skipped_section(MemoryRegionSection *section)
 }
 
 /* Called with rcu_read_lock held.  */
-static bool vfio_get_vaddr(IOMMUTLBEntry *iotlb, void **vaddr,
-                           bool *read_only)
+static MemoryRegion *vfio_get_vaddr(IOMMUTLBEntry *iotlb, void **vaddr,
+                                    bool *read_only)
 {
     MemoryRegion *mr;
     hwaddr xlat;
@@ -328,7 +413,7 @@ static bool vfio_get_vaddr(IOMMUTLBEntry *iotlb, void **vaddr,
     if (!memory_region_is_ram(mr)) {
         error_report("iommu map to non memory area %"HWADDR_PRIx"",
                      xlat);
-        return false;
+        return NULL;
     }
 
     /*
@@ -337,13 +422,13 @@ static bool vfio_get_vaddr(IOMMUTLBEntry *iotlb, void **vaddr,
      */
     if (len & iotlb->addr_mask) {
         error_report("iommu has granularity incompatible with target AS");
-        return false;
+        return NULL;
     }
 
     *vaddr = memory_region_get_ram_ptr(mr) + xlat;
     *read_only = !writable || mr->readonly;
 
-    return true;
+    return mr;
 }
 
 static void vfio_iommu_map_notify(IOMMUNotifier *n, IOMMUTLBEntry *iotlb)
@@ -366,20 +451,22 @@ static void vfio_iommu_map_notify(IOMMUNotifier *n, IOMMUTLBEntry *iotlb)
 
     rcu_read_lock();
 
+    /*
+     * vaddr is only valid until rcu_read_unlock(). But after
+     * vfio_dma_map has set up the mapping the pages will be
+     * pinned by the kernel. This makes sure that the RAM backend
+     * of vaddr will always be there, even if the memory object is
+     * destroyed and its backing memory munmap-ed.
+     */
+    MemoryRegion *mr = vfio_get_vaddr(iotlb, &vaddr, &read_only);
+    if (!mr) {
+        goto out;
+    }
+
     if ((iotlb->perm & IOMMU_RW) != IOMMU_NONE) {
-        if (!vfio_get_vaddr(iotlb, &vaddr, &read_only)) {
-            goto out;
-        }
-        /*
-         * vaddr is only valid until rcu_read_unlock(). But after
-         * vfio_dma_map has set up the mapping the pages will be
-         * pinned by the kernel. This makes sure that the RAM backend
-         * of vaddr will always be there, even if the memory object is
-         * destroyed and its backing memory munmap-ed.
-         */
         ret = vfio_dma_map(container, iova,
                            iotlb->addr_mask + 1, vaddr,
-                           read_only);
+                           read_only, mr);
         if (ret) {
             error_report("vfio_dma_map(%p, 0x%"HWADDR_PRIx", "
                          "0x%"HWADDR_PRIx", %p) = %d (%m)",
@@ -387,7 +474,7 @@ static void vfio_iommu_map_notify(IOMMUNotifier *n, IOMMUTLBEntry *iotlb)
                          iotlb->addr_mask + 1, vaddr, ret);
         }
     } else {
-        ret = vfio_dma_unmap(container, iova, iotlb->addr_mask + 1);
+        ret = vfio_dma_unmap(container, iova, iotlb->addr_mask + 1, mr);
         if (ret) {
             error_report("vfio_dma_unmap(%p, 0x%"HWADDR_PRIx", "
                          "0x%"HWADDR_PRIx") = %d (%m)",
@@ -558,7 +645,7 @@ static void vfio_listener_region_add(MemoryListener *listener,
     }
 
     ret = vfio_dma_map(container, iova, int128_get64(llsize),
-                       vaddr, section->readonly);
+                       vaddr, section->readonly, section->mr);
     if (ret) {
         error_report("vfio_dma_map(%p, 0x%"HWADDR_PRIx", "
                      "0x%"HWADDR_PRIx", %p) = %d (%m)",
@@ -669,7 +756,7 @@ static void vfio_listener_region_del(MemoryListener *listener,
     }
 
     if (try_unmap) {
-        ret = vfio_dma_unmap(container, iova, int128_get64(llsize));
+        ret = vfio_dma_unmap(container, iova, int128_get64(llsize), section->mr);
         if (ret) {
             error_report("vfio_dma_unmap(%p, 0x%"HWADDR_PRIx", "
                          "0x%"HWADDR_PRIx") = %d (%m)",

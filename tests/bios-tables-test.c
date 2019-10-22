@@ -468,7 +468,8 @@ static void test_acpi_asl(test_data *data)
                             "see ASL difference.");
                     }
                 }
-          }
+            }
+            g_assert_false("Unexpected differences");
         }
         g_string_free(asl, true);
         g_string_free(exp_asl, true);
@@ -608,18 +609,8 @@ static void test_smbios_structs(test_data *data)
     }
 }
 
-static void test_acpi_one(const char *params, test_data *data)
+static void test_acpi_one_args(const char *args, test_data *data)
 {
-    char *args;
-
-    /* Disable kernel irqchip to be able to override apic irq0. */
-    args = g_strdup_printf("-machine %s,accel=%s,kernel-irqchip=off "
-                           "-net none -display none %s "
-                           "-drive id=hd0,if=none,file=%s,format=raw "
-                           "-device ide-hd,drive=hd0 ",
-                           data->machine, "kvm:tcg",
-                           params ? params : "", disk);
-
     qtest_start(args);
 
     boot_sector_test(global_qtest);
@@ -647,6 +638,20 @@ static void test_acpi_one(const char *params, test_data *data)
     test_smbios_structs(data);
 
     qtest_quit(global_qtest);
+}
+
+static void test_acpi_one(const char *params, test_data *data)
+{
+    char *args;
+
+    /* Disable kernel irqchip to be able to override apic irq0. */
+    args = g_strdup_printf("-machine %s,accel=%s,kernel-irqchip=off "
+                           "-net none -display none %s "
+                           "-drive id=hd0,if=none,file=%s,format=raw "
+                           "-device virtio-blk-pci,drive=hd0 ",
+                           data->machine, "kvm:tcg",
+                           params ? params : "", disk);
+    test_acpi_one_args(args, data);
     g_free(args);
 }
 
@@ -859,6 +864,49 @@ static void test_acpi_piix4_tcg_dimm_pxm(void)
     test_acpi_tcg_dimm_pxm(MACHINE_PC);
 }
 
+static void test_acpi_q35_yc(void)
+{
+    test_data data;
+    char *args;
+
+    memset(&data, 0, sizeof(data));
+    data.machine = MACHINE_Q35;
+    data.variant = ".ya";
+
+    args = g_strdup_printf(
+        "-machine q35,accel=kvm,sata=false,usb=off,kernel-irqchip=off"
+        " -object memory-backend-ram,id=mem0,size=128M"
+        " -numa node,memdev=mem0"
+        " -vga std"
+        " -device usb-ehci"
+        " -device usb-tablet"
+        " -device pxb-pcie,bus_nr=128,bus=pcie.0,id=pcie.1,numa_node=0"
+        " -device pcie-root-port,id=s0,slot=0,bus=pcie.1"
+        " -device pcie-root-port,id=s1,slot=1,bus=pcie.1"
+        " -device pcie-root-port,id=s2,slot=2,bus=pcie.1"
+        " -device pcie-root-port,id=s3,slot=3,bus=pcie.1"
+        " -device pcie-root-port,id=s4,slot=4,bus=pcie.1"
+        " -device pcie-root-port,id=s5,slot=5,bus=pcie.1"
+        " -device pcie-root-port,id=s6,slot=6,bus=pcie.1"
+        " -device pcie-root-port,id=s7,slot=7,bus=pcie.1"
+        " -device pxb-pcie,bus_nr=137,bus=pcie.0,id=pcie.2,numa_node=0"
+        " -device pcie-root-port,id=s8,slot=8,bus=pcie.2"
+        " -device pcie-root-port,id=s9,slot=9,bus=pcie.2"
+        " -device pcie-root-port,id=s10,slot=10,bus=pcie.2"
+        " -device pcie-root-port,id=s11,slot=11,bus=pcie.2"
+        " -device pcie-root-port,id=s12,slot=12,bus=pcie.2"
+        " -device pcie-root-port,id=s13,slot=13,bus=pcie.2"
+        " -device pcie-root-port,id=s14,slot=14,bus=pcie.2"
+        " -device pcie-root-port,id=s15,slot=15,bus=pcie.2"
+        " -net none -display none"
+        " -drive id=hd0,if=none,file=%s,format=raw"
+        " -device virtio-blk-pci,drive=hd0,bus=s0",
+        disk);
+    test_acpi_one_args(args, &data);
+    g_free(args);
+    free_test_data(&data);
+}
+
 int main(int argc, char *argv[])
 {
     const char *arch = qtest_get_arch();
@@ -871,20 +919,43 @@ int main(int argc, char *argv[])
     g_test_init(&argc, &argv, NULL);
 
     if (strcmp(arch, "i386") == 0 || strcmp(arch, "x86_64") == 0) {
-        qtest_add_func("acpi/piix4", test_acpi_piix4_tcg);
-        qtest_add_func("acpi/piix4/bridge", test_acpi_piix4_tcg_bridge);
-        qtest_add_func("acpi/q35", test_acpi_q35_tcg);
-        qtest_add_func("acpi/q35/bridge", test_acpi_q35_tcg_bridge);
-        qtest_add_func("acpi/piix4/ipmi", test_acpi_piix4_tcg_ipmi);
-        qtest_add_func("acpi/q35/ipmi", test_acpi_q35_tcg_ipmi);
-        qtest_add_func("acpi/piix4/cpuhp", test_acpi_piix4_tcg_cphp);
-        qtest_add_func("acpi/q35/cpuhp", test_acpi_q35_tcg_cphp);
-        qtest_add_func("acpi/piix4/memhp", test_acpi_piix4_tcg_memhp);
-        qtest_add_func("acpi/q35/memhp", test_acpi_q35_tcg_memhp);
-        qtest_add_func("acpi/piix4/numamem", test_acpi_piix4_tcg_numamem);
-        qtest_add_func("acpi/q35/numamem", test_acpi_q35_tcg_numamem);
-        qtest_add_func("acpi/piix4/dimmpxm", test_acpi_piix4_tcg_dimm_pxm);
-        qtest_add_func("acpi/q35/dimmpxm", test_acpi_q35_tcg_dimm_pxm);
+        bool has_ipmi_dev = qtest_is_device_supported("ipmi-bmc-sim");
+        bool has_pci_bridge = qtest_is_device_supported("pci-bridge");
+        bool has_nvdimm = qtest_is_device_supported("nvdimm");
+
+        if (qtest_is_supported_machine_type(MACHINE_PC)) {
+            qtest_add_func("acpi/piix4", test_acpi_piix4_tcg);
+            if (has_pci_bridge) {
+                qtest_add_func("acpi/piix4/bridge", test_acpi_piix4_tcg_bridge);
+            }
+            if (has_ipmi_dev) {
+                qtest_add_func("acpi/piix4/ipmi", test_acpi_piix4_tcg_ipmi);
+            }
+            qtest_add_func("acpi/piix4/cpuhp", test_acpi_piix4_tcg_cphp);
+            qtest_add_func("acpi/piix4/memhp", test_acpi_piix4_tcg_memhp);
+            qtest_add_func("acpi/piix4/numamem", test_acpi_piix4_tcg_numamem);
+            if (has_nvdimm) {
+                qtest_add_func("acpi/piix4/dimmpxm",
+                               test_acpi_piix4_tcg_dimm_pxm);
+            }
+        }
+
+        if (qtest_is_supported_machine_type(MACHINE_Q35)) {
+            qtest_add_func("acpi/q35", test_acpi_q35_tcg);
+            if (has_pci_bridge) {
+                qtest_add_func("acpi/q35/bridge", test_acpi_q35_tcg_bridge);
+            }
+            if (has_ipmi_dev) {
+                qtest_add_func("acpi/q35/ipmi", test_acpi_q35_tcg_ipmi);
+            }
+            qtest_add_func("acpi/q35/cpuhp", test_acpi_q35_tcg_cphp);
+            qtest_add_func("acpi/q35/memhp", test_acpi_q35_tcg_memhp);
+            qtest_add_func("acpi/q35/numamem", test_acpi_q35_tcg_numamem);
+            if (has_nvdimm) {
+                qtest_add_func("acpi/q35/dimmpxm", test_acpi_q35_tcg_dimm_pxm);
+            }
+            qtest_add_func("acpi/q35/yc", test_acpi_q35_yc);
+        }
     }
     ret = g_test_run();
     boot_sector_cleanup(disk);

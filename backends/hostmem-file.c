@@ -53,12 +53,19 @@ file_backend_memory_alloc(HostMemoryBackend *backend, Error **errp)
     error_setg(errp, "-mem-path not supported on this host");
 #else
     if (!host_memory_backend_mr_inited(backend)) {
+        uint32_t ram_flags = 0;
         gchar *path;
         backend->force_prealloc = mem_prealloc;
         path = object_get_canonical_path(OBJECT(backend));
+        if (backend->share) {
+            ram_flags |= RAM_SHARED;
+            if (ram_is_migration_incoming) {
+                ram_flags |= RAM_PROTECTED;
+            }
+        }
         memory_region_init_ram_from_file(&backend->mr, OBJECT(backend),
                                  path,
-                                 backend->size, fb->align, backend->share,
+                                 backend->size, fb->align, ram_flags,
                                  fb->mem_path, errp);
         g_free(path);
     }

@@ -257,6 +257,8 @@ static void qemu_net_client_setup(NetClientState *nc,
     nc->incoming_queue = qemu_new_net_queue(qemu_deliver_packet_iov, nc);
     nc->destructor = destructor;
     QTAILQ_INIT(&nc->filters);
+
+    net_acct_init(&nc->stats);
 }
 
 NetClientState *qemu_new_net_client(NetClientInfo *info,
@@ -345,6 +347,7 @@ static void qemu_free_net_client(NetClientState *nc)
     }
     g_free(nc->name);
     g_free(nc->model);
+    net_acct_cleanup(&nc->stats);
     if (nc->destructor) {
         nc->destructor(nc);
     }
@@ -712,10 +715,15 @@ ssize_t qemu_deliver_packet_iov(NetClientState *sender,
                                 void *opaque)
 {
     NetClientState *nc = opaque;
+    size_t size = iov_size(iov, iovcnt);
     int ret;
 
+    if (size > INT_MAX) {
+        return size;
+    }
+
     if (nc->link_down) {
-        return iov_size(iov, iovcnt);
+        return size;
     }
 
     if (nc->receive_disabled) {
@@ -1307,6 +1315,111 @@ RxFilterInfoList *qmp_query_rx_filter(bool has_name, const char *name,
     }
 
     return filter_list;
+}
+
+void qmp_x_net_latency_histogram_set(
+    const char *name,
+    bool has_boundaries, uint64List *boundaries,
+    bool has_boundaries_rx, uint64List *boundaries_rx,
+    bool has_boundaries_tx, uint64List *boundaries_tx,
+    Error **errp)
+{
+    NetClientState *nc;
+
+    QTAILQ_FOREACH(nc, &net_clients, next) {
+        if (strcmp(nc->name, name) != 0) {
+            continue;
+        }
+
+        if (!has_boundaries && !has_boundaries_rx && !has_boundaries_tx) {
+            net_latency_histograms_clear(&nc->stats);
+            if (nc->peer) {
+                net_latency_histograms_clear(&nc->peer->stats);
+            }
+            return;
+        }
+
+        if (nc->peer && (has_boundaries || has_boundaries_rx)) {
+            net_latency_histogram_set(&nc->peer->stats,
+                has_boundaries_rx ? boundaries_rx : boundaries);
+        }
+
+        if (has_boundaries || has_boundaries_tx) {
+            net_latency_histogram_set(&nc->stats,
+                has_boundaries_tx ? boundaries_tx : boundaries);
+        }
+
+        /* Continue on, we track per-queue stats for common device name */
+    }
+}
+
+typedef struct NetStatList {
+    NetDeviceStatsList *head;
+    NetDeviceStatsList **p_next;
+} NetStatList;
+
+static void append_nic_stats(NICState *nic, void *opaque)
+{
+    NetStatList *list = opaque;
+
+    NetQueueStats *qst = g_malloc0(sizeof(*qst));
+    LatencyHistogram tx_hist = {0, NULL, NULL};
+    LatencyHistogram rx_hist = {0, NULL, NULL};
+
+    for (int i = 0; i < nic->conf->peers.queues; ++i) {
+        NetClientState *nc = &nic->ncs[i];
+
+        /* We're only interested in NIC driver types */
+        if (nc->info->type != NET_CLIENT_DRIVER_NIC) {
+            continue;
+        }
+
+        qst->tx_bytes += nc->stats.nr_bytes;
+        qst->tx_operations += nc->stats.nr_completed;
+        qst->tx_in_flight_operations += nc->stats.nr_in_flight;
+        qst->tx_failed_operations += nc->stats.nr_failed;
+        qst->tx_dropped_operations += nc->stats.nr_dropped;
+
+        latency_histogram_accumulate(&tx_hist, &nc->stats.latency_histogram);
+
+        if (nc->peer) {
+            qst->rx_bytes += nc->peer->stats.nr_bytes;
+            qst->rx_operations += nc->peer->stats.nr_completed;
+            qst->rx_in_flight_operations += nc->peer->stats.nr_in_flight;
+            qst->rx_failed_operations += nc->peer->stats.nr_failed;
+            qst->rx_dropped_operations += nc->peer->stats.nr_dropped;
+
+            latency_histogram_accumulate(&rx_hist, &nc->peer->stats.latency_histogram);
+        }
+    }
+
+    qst->tx_latency_histogram = latency_histogram_info(&tx_hist);
+    qst->has_tx_latency_histogram = (qst->tx_latency_histogram != NULL);
+    qst->rx_latency_histogram = latency_histogram_info(&rx_hist);
+    qst->has_rx_latency_histogram = (qst->rx_latency_histogram != NULL);
+
+    NetClientState *nc = &nic->ncs[0];
+
+    NetDeviceStats *devst = g_malloc0(sizeof(*devst));
+    devst->device = g_strdup(nc->name);
+    devst->stats = qst;
+
+    NetDeviceStatsList *info = g_malloc0(sizeof(*info));
+    info->value = devst;
+
+    *(list->p_next) = info;
+    list->p_next = &info->next;
+}
+
+NetDeviceStatsList *qmp_x_query_netstats(Error **errp)
+{
+    NetStatList list;
+    list.head = NULL;
+    list.p_next = &list.head;
+
+    qemu_foreach_nic(append_nic_stats, &list);
+
+    return list.head;
 }
 
 void hmp_info_network(Monitor *mon, const QDict *qdict)

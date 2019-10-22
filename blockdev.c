@@ -42,6 +42,7 @@
 #include "qemu/config-file.h"
 #include "qapi/qapi-commands-block.h"
 #include "qapi/qapi-commands-transaction.h"
+#include "qapi/qapi-events-misc.h"
 #include "qapi/qapi-visit-block-core.h"
 #include "qapi/qmp/qdict.h"
 #include "qapi/qmp/qnum.h"
@@ -1191,7 +1192,7 @@ void hmp_commit(Monitor *mon, const QDict *qdict)
         BlockDriverState *bs;
         AioContext *aio_context;
 
-        blk = blk_by_name(device);
+        blk = blk_lookup(device);
         if (!blk) {
             monitor_printf(mon, "Device '%s' not found\n", device);
             return;
@@ -2958,14 +2959,14 @@ void hmp_drive_del(Monitor *mon, const QDict *qdict)
 
     bs = bdrv_find_node(id);
     if (bs) {
-        qmp_blockdev_del(id, &local_err);
+        qmp_blockdev_del(id, false, false, &local_err);
         if (local_err) {
             error_report_err(local_err);
         }
         return;
     }
 
-    blk = blk_by_name(id);
+    blk = blk_lookup(id);
     if (!blk) {
         error_report("Device '%s' not found", id);
         return;
@@ -4039,6 +4040,28 @@ out:
     qemu_opts_del(opts);
 }
 
+static void coroutine_fn blockdev_add_async(void* opaque)
+{
+    struct QDict *bs_opts = opaque;
+    BlockDriverState *bs;
+    Error *local_err = NULL;
+
+    QINCREF(bs_opts);
+    char *node_name = g_strdup(qdict_get_str(bs_opts, "node-name"));
+
+    bs = bds_tree_init(bs_opts, &local_err);
+    if (bs) {
+        QTAILQ_INSERT_TAIL(&monitor_bdrv_states, bs, monitor_list);
+    }
+
+    qapi_event_send_blockdev_added(node_name, !!local_err,
+        local_err ? error_get_pretty(local_err) : NULL, &error_abort);
+
+    QDECREF(bs_opts);
+    g_free(node_name);
+    error_free(local_err);
+}
+
 void qmp_blockdev_add(BlockdevOptions *options, Error **errp)
 {
     BlockDriverState *bs;
@@ -4063,18 +4086,35 @@ void qmp_blockdev_add(BlockdevOptions *options, Error **errp)
         goto fail;
     }
 
-    bs = bds_tree_init(qdict, errp);
-    if (!bs) {
-        goto fail;
-    }
+    if (qdict_get_try_bool(qdict, "async", false)) {
+        Coroutine *co = qemu_coroutine_create(blockdev_add_async, qdict);
+        qemu_coroutine_enter(co);
+    } else {
+        bs = bds_tree_init(qdict, errp);
+        if (!bs) {
+            goto fail;
+        }
 
-    QTAILQ_INSERT_TAIL(&monitor_bdrv_states, bs, monitor_list);
+        QTAILQ_INSERT_TAIL(&monitor_bdrv_states, bs, monitor_list);
+    }
 
 fail:
     visit_free(v);
 }
 
-void qmp_blockdev_del(const char *node_name, Error **errp)
+static void coroutine_fn blockdev_del_async(void *opaque)
+{
+    BlockDriverState *bs = opaque;
+    char *node_name = g_strdup(bs->node_name);
+
+    bdrv_unref(bs);
+
+    qapi_event_send_blockdev_deleted(node_name, &error_abort);
+    g_free(node_name);
+}
+
+void qmp_blockdev_del(const char *node_name, bool has_async, bool async,
+                      Error **errp)
 {
     AioContext *aio_context;
     BlockDriverState *bs;
@@ -4108,7 +4148,12 @@ void qmp_blockdev_del(const char *node_name, Error **errp)
     }
 
     QTAILQ_REMOVE(&monitor_bdrv_states, bs, monitor_list);
-    bdrv_unref(bs);
+    if (has_async && async) {
+        Coroutine *co = qemu_coroutine_create(blockdev_del_async, bs);
+        qemu_aio_coroutine_enter(aio_context, co);
+    } else {
+        bdrv_unref(bs);
+    }
 
 out:
     aio_context_release(aio_context);
@@ -4247,7 +4292,7 @@ void qmp_x_block_latency_histogram_set(
     bool has_boundaries_flush, uint64List *boundaries_flush,
     Error **errp)
 {
-    BlockBackend *blk = blk_by_name(device);
+    BlockBackend *blk = blk_lookup(device);
     BlockAcctStats *stats;
 
     if (!blk) {

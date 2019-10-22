@@ -451,6 +451,7 @@ jemalloc="no"
 replication="yes"
 vxhs=""
 libxml2=""
+block_plugins="yes"
 
 supported_cpu="no"
 supported_os="no"
@@ -1374,6 +1375,10 @@ for opt do
   ;;
   --disable-git-update) git_update=no
   ;;
+  --disable-block-plugins) block_plugins="no"
+  ;;
+  --enable-block-plugins) block_plugins="yes"
+  ;;
   *)
       echo "ERROR: unknown option $opt"
       echo "Try '$0 --help' for more information"
@@ -1621,6 +1626,7 @@ disabled with --disable-FEATURE, default is enabled if available:
   tcmalloc        tcmalloc support
   jemalloc        jemalloc support
   replication     replication support
+  block-plugins   pluggable block format driver support
   vhost-vsock     virtio sockets device support
   opengl          opengl support
   virglrenderer   virgl rendering support
@@ -2137,13 +2143,10 @@ fi
 ##########################################
 # libseccomp check
 
+libseccomp_minver="2.2.0"
 if test "$seccomp" != "no" ; then
     case "$cpu" in
-    i386|x86_64)
-        libseccomp_minver="2.1.0"
-        ;;
-    mips)
-        libseccomp_minver="2.2.0"
+    i386|x86_64|mips)
         ;;
     arm|aarch64)
         libseccomp_minver="2.2.3"
@@ -4393,6 +4396,12 @@ else
   error_exit "libm check failed"
 fi
 
+#########################################
+# We need dl for block plugins
+if test "$block_plugins" != "no" ; then
+  LIBS="-ldl $LIBS"
+fi
+
 ##########################################
 # Do we need librt
 # uClibc provides 2 versions of clock_gettime(), one with realtime
@@ -5874,6 +5883,7 @@ echo "avx2 optimization $avx2_opt"
 echo "replication support $replication"
 echo "VxHS block device $vxhs"
 echo "capstone          $capstone"
+echo "block plugins support $block_plugins"
 
 if test "$sdl_too_old" = "yes"; then
 echo "-> Your SDL version is too old - please upgrade to have SDL support"
@@ -6580,6 +6590,10 @@ if test "$replication" = "yes" ; then
   echo "CONFIG_REPLICATION=y" >> $config_host_mak
 fi
 
+if test "$block_plugins" = "yes" ; then
+  echo "CONFIG_BLOCK_PLUGINS=y" >> $config_host_mak
+fi
+
 if test "$have_af_vsock" = "yes" ; then
   echo "CONFIG_AF_VSOCK=y" >> $config_host_mak
 fi
@@ -7125,12 +7139,15 @@ fi
 
 # build tree in object directory in case the source is not in the current directory
 DIRS="tests tests/tcg tests/tcg/cris tests/tcg/lm32 tests/libqos tests/qapi-schema tests/tcg/xtensa tests/qemu-iotests tests/vm"
+DIRS="$DIRS tests/pvh_elfboot"
 DIRS="$DIRS docs docs/interop fsdev scsi"
 DIRS="$DIRS pc-bios/optionrom pc-bios/spapr-rtas pc-bios/s390-ccw"
 DIRS="$DIRS roms/seabios roms/vgabios"
 FILES="Makefile tests/tcg/Makefile qdict-test-data.txt"
 FILES="$FILES tests/tcg/cris/Makefile tests/tcg/cris/.gdbinit"
 FILES="$FILES tests/tcg/lm32/Makefile tests/tcg/xtensa/Makefile po/Makefile"
+FILES="$FILES tests/pvh_elfboot/Makefile"
+FILES="$FILES security-policy"
 FILES="$FILES pc-bios/optionrom/Makefile pc-bios/keymaps"
 FILES="$FILES pc-bios/spapr-rtas/Makefile"
 FILES="$FILES pc-bios/s390-ccw/Makefile"

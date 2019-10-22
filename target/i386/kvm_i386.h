@@ -69,4 +69,6 @@ void kvm_put_apicbase(X86CPU *cpu, uint64_t value);
 
 bool kvm_enable_x2apic(void);
 bool kvm_has_x2apic_api(void);
+
+bool kvm_hyperv_enabled(X86CPU *cs);
 #endif

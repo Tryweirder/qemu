@@ -21,6 +21,14 @@
 
 #define ACPI_PCIHP_ADDR         0xae00
 #define PCI_EJ_BASE             0x0008
+#define PCI_SEL_BASE            0x0010
+
+#define PCI_BRIDGE_CLASS            0x06
+#define PCI_TO_PCI_BRIDGE_SUBCLASS  0x04
+
+#define PCI_BRIDGE_PRIMARY_BUS_OFFSET       0x18
+#define PCI_BRIDGE_SECONDARY_BUS_OFFSET     0x19
+#define PCI_BRIDGE_SUBORDINATE_BUS_OFFSET   0x1A
 
 typedef struct QPCIBusPC
 {
@@ -29,43 +37,44 @@ typedef struct QPCIBusPC
 
 static uint8_t qpci_pc_pio_readb(QPCIBus *bus, uint32_t addr)
 {
-    return inb(addr);
+    return qtest_inb(bus->qts, addr);
 }
 
 static void qpci_pc_pio_writeb(QPCIBus *bus, uint32_t addr, uint8_t val)
 {
-    outb(addr, val);
+    qtest_outb(bus->qts, addr, val);
 }
 
 static uint16_t qpci_pc_pio_readw(QPCIBus *bus, uint32_t addr)
 {
-    return inw(addr);
+    return qtest_inw(bus->qts, addr);
 }
 
 static void qpci_pc_pio_writew(QPCIBus *bus, uint32_t addr, uint16_t val)
 {
-    outw(addr, val);
+    qtest_outw(bus->qts, addr, val);
 }
 
 static uint32_t qpci_pc_pio_readl(QPCIBus *bus, uint32_t addr)
 {
-    return inl(addr);
+    return qtest_inl(bus->qts, addr);
 }
 
 static void qpci_pc_pio_writel(QPCIBus *bus, uint32_t addr, uint32_t val)
 {
-    outl(addr, val);
+    qtest_outl(bus->qts, addr, val);
 }
 
 static uint64_t qpci_pc_pio_readq(QPCIBus *bus, uint32_t addr)
 {
-    return (uint64_t)inl(addr) + ((uint64_t)inl(addr + 4) << 32);
+    return (uint64_t)qtest_inl(bus->qts, addr) +
+           ((uint64_t)qtest_inl(bus->qts, addr + 4) << 32);
 }
 
 static void qpci_pc_pio_writeq(QPCIBus *bus, uint32_t addr, uint64_t val)
 {
-    outl(addr, val & 0xffffffff);
-    outl(addr + 4, val >> 32);
+    qtest_outl(bus->qts, addr, val & 0xffffffff);
+    qtest_outl(bus->qts, addr + 4, val >> 32);
 }
 
 static void qpci_pc_memread(QPCIBus *bus, uint32_t addr, void *buf, size_t len)
@@ -79,43 +88,86 @@ static void qpci_pc_memwrite(QPCIBus *bus, uint32_t addr,
     memwrite(addr, buf, len);
 }
 
+static inline void qpci_pc_config_set_addr(QPCIBus *bus, int devfn,
+                                           uint8_t offset)
+{
+    uint32_t addr = (uint32_t)(0x80000000) |
+        (((uint32_t)bus->id & 0xFF) << 16) |
+        (((uint32_t)devfn & 0xFF) << 8) |
+        (offset);
+
+    qtest_outl(bus->qts, 0xcf8, addr);
+}
+
 static uint8_t qpci_pc_config_readb(QPCIBus *bus, int devfn, uint8_t offset)
 {
-    outl(0xcf8, (1U << 31) | (devfn << 8) | offset);
-    return inb(0xcfc);
+    qpci_pc_config_set_addr(bus, devfn, offset);
+    return qtest_inb(bus->qts, 0xcfc);
 }
 
 static uint16_t qpci_pc_config_readw(QPCIBus *bus, int devfn, uint8_t offset)
 {
-    outl(0xcf8, (1U << 31) | (devfn << 8) | offset);
-    return inw(0xcfc);
+    qpci_pc_config_set_addr(bus, devfn, offset);
+    return qtest_inw(bus->qts, 0xcfc);
 }
 
 static uint32_t qpci_pc_config_readl(QPCIBus *bus, int devfn, uint8_t offset)
 {
-    outl(0xcf8, (1U << 31) | (devfn << 8) | offset);
-    return inl(0xcfc);
+    qpci_pc_config_set_addr(bus, devfn, offset);
+    return qtest_inl(bus->qts, 0xcfc);
 }
 
-static void qpci_pc_config_writeb(QPCIBus *bus, int devfn, uint8_t offset, uint8_t value)
+static void qpci_pc_config_writeb(QPCIBus *bus, int devfn, uint8_t offset,
+                                  uint8_t value)
 {
-    outl(0xcf8, (1U << 31) | (devfn << 8) | offset);
-    outb(0xcfc, value);
+    qpci_pc_config_set_addr(bus, devfn, offset);
+    qtest_outb(bus->qts, 0xcfc, value);
 }
 
-static void qpci_pc_config_writew(QPCIBus *bus, int devfn, uint8_t offset, uint16_t value)
+static void qpci_pc_config_writew(QPCIBus *bus, int devfn, uint8_t offset,
+                                  uint16_t value)
 {
-    outl(0xcf8, (1U << 31) | (devfn << 8) | offset);
-    outw(0xcfc, value);
+    qpci_pc_config_set_addr(bus, devfn, offset);
+    qtest_outw(bus->qts, 0xcfc, value);
 }
 
-static void qpci_pc_config_writel(QPCIBus *bus, int devfn, uint8_t offset, uint32_t value)
+static void qpci_pc_config_writel(QPCIBus *bus, int devfn, uint8_t offset,
+                                  uint32_t value)
 {
-    outl(0xcf8, (1U << 31) | (devfn << 8) | offset);
-    outl(0xcfc, value);
+    qpci_pc_config_set_addr(bus, devfn, offset);
+    qtest_outl(bus->qts, 0xcfc, value);
 }
 
-QPCIBus *qpci_init_pc(QTestState *qts, QGuestAllocator *alloc)
+static QPCIBus *qpci_create_bus(QTestState *qts, uint16_t id);
+
+static void qpci_topology_scan_cb(QPCIDevice *dev, int fn, void *data)
+{
+    uint16_t class_id = qpci_config_readw(dev, PCI_CLASS_DEVICE);
+    if (class_id == ((PCI_BRIDGE_CLASS << 8) | PCI_TO_PCI_BRIDGE_SUBCLASS)) {
+
+        QPCIBus *parent = dev->bus;
+
+        /* Handle PCI-to-PCI bridge device */
+        QPCIBus *child = qpci_create_bus(parent->qts,
+                                         parent->total_subordinates + 1);
+        QLIST_INSERT_HEAD(&parent->children, child, link);
+
+        parent->total_subordinates = child->total_subordinates + 1;
+        if (parent->subordinate_bus_id < child->subordinate_bus_id) {
+            parent->subordinate_bus_id = child->subordinate_bus_id;
+        }
+
+        qpci_config_writeb(dev, PCI_BRIDGE_PRIMARY_BUS_OFFSET, parent->id);
+        qpci_config_writeb(dev, PCI_BRIDGE_SECONDARY_BUS_OFFSET, child->id);
+        qpci_config_writeb(dev, PCI_BRIDGE_SUBORDINATE_BUS_OFFSET,
+                           child->subordinate_bus_id);
+        qpci_device_enable(dev);
+    }
+
+    g_free(dev);
+}
+
+static QPCIBus *qpci_create_bus(QTestState *qts, uint16_t id)
 {
     QPCIBusPC *ret = g_new0(QPCIBusPC, 1);
 
@@ -143,21 +195,50 @@ QPCIBus *qpci_init_pc(QTestState *qts, QGuestAllocator *alloc)
     ret->bus.config_writel = qpci_pc_config_writel;
 
     ret->bus.qts = qts;
-    ret->bus.pio_alloc_ptr = 0xc000;
-    ret->bus.mmio_alloc_ptr = 0xE0000000;
+    ret->bus.pio_alloc_ptr = 0xc000 + id * 0x1000;
+    ret->bus.mmio_alloc_ptr = 0xE0000000 + id * 0x1000;
     ret->bus.mmio_limit = 0x100000000ULL;
+
+    ret->bus.id = id;
+    ret->bus.total_subordinates = 0;
+    ret->bus.subordinate_bus_id = id; /* For now we're our own subordinate */
+    QLIST_INIT(&ret->bus.children);
+
+    qpci_device_foreach(&ret->bus, -1, -1, qpci_topology_scan_cb, ret);
 
     return &ret->bus;
 }
 
+QPCIBus *qpci_init_pc(QTestState *qts, QGuestAllocator *alloc)
+{
+    QPCIBus *root = qpci_create_bus(qts, 0);
+    return root;
+}
+
 void qpci_free_pc(QPCIBus *bus)
 {
-    QPCIBusPC *s = container_of(bus, QPCIBusPC, bus);
+    if (!bus) {
+        return;
+    }
 
+    while (!QLIST_EMPTY(&bus->children)) {
+        QPCIBus *child = QLIST_FIRST(&bus->children);
+        g_assert(child);
+
+        QLIST_REMOVE(child, link);
+        qpci_free_pc(child);
+    }
+
+    QPCIBusPC *s = container_of(bus, QPCIBusPC, bus);
     g_free(s);
 }
 
 void qpci_unplug_acpi_device_test(const char *id, uint8_t slot)
+{
+    qpci_unplug_acpi_device_bus_test(id, 0, slot);
+}
+
+void qpci_unplug_acpi_device_bus_test(const char *id, uint8_t bus, uint8_t slot)
 {
     QDict *response;
     char *cmd;
@@ -172,7 +253,8 @@ void qpci_unplug_acpi_device_test(const char *id, uint8_t slot)
     g_assert(!qdict_haskey(response, "error"));
     QDECREF(response);
 
-    outb(ACPI_PCIHP_ADDR + PCI_EJ_BASE, 1 << slot);
+    qtest_outb(global_qtest, ACPI_PCIHP_ADDR + PCI_SEL_BASE, bus);
+    qtest_outb(global_qtest, ACPI_PCIHP_ADDR + PCI_EJ_BASE, 1 << slot);
 
     qmp_eventwait("DEVICE_DELETED");
 }

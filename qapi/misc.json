@@ -3449,3 +3449,66 @@
 ##
 { 'command': 'x-oob-test', 'data' : { 'lock': 'bool' },
   'allow-oob': true }
+
+##
+# @RamBlockInfo:
+#
+# Ram block information
+#
+# Since: 2.12
+##
+{ 'struct': 'RamBlockInfo',
+  'data': { 'used': 'uint64',
+            'size': 'uint64',
+            'id': 'str'
+          }
+}
+
+##
+# @query-ramblocks:
+#
+# Returns: a list of RamBlockInfo objects.
+#
+# Since: 2.12
+##
+{ 'command': 'query-ramblocks', 'returns': ['RamBlockInfo'] }
+
+##
+# @BLOCKDEV_ADDED:
+#
+# Emitted when async blockdev-add has completed
+#
+# @node-name: name of the node
+#
+# @error: human-readable error string that provides
+#         hint on why mount failed. Only presents on failure. The
+#         user should not try to interpret the error string.
+#
+# Since: 2.12
+#
+# Example:
+#
+# { "event": "BLOCKDEV_ADDED",
+#   "data": {"node-name": "disk_0" }}
+#
+##
+{ 'event': 'BLOCKDEV_ADDED' ,
+  'data': { 'node-name': 'str',  '*error': 'str' } }
+
+##
+# @BLOCKDEV_DELETED:
+#
+# Emitted when async blockdev-del has completed
+#
+# @node-name: node name
+#
+# Since: 2.12
+#
+# Example:
+#
+# { "event": "BLOCKDEV_DELETED",
+#   "data": {"node-name": "disk_0" }}
+#
+##
+{ 'event': 'BLOCKDEV_DELETED' ,
+  'data': { 'node-name': 'str' } }

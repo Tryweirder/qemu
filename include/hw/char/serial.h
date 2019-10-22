@@ -96,6 +96,7 @@ SerialState *serial_mm_init(MemoryRegion *address_space,
 
 /* serial-isa.c */
 #define TYPE_ISA_SERIAL "isa-serial"
+extern const int isa_serial_irq[MAX_SERIAL_PORTS];
 void serial_hds_isa_init(ISABus *bus, int from, int to);
 
 #endif

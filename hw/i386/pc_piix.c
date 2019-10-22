@@ -59,9 +59,11 @@
 
 #define MAX_IDE_BUS 2
 
+#ifdef CONFIG_IDE_PIIX
 static const int ide_iobase[MAX_IDE_BUS] = { 0x1f0, 0x170 };
 static const int ide_iobase2[MAX_IDE_BUS] = { 0x3f6, 0x376 };
 static const int ide_irq[MAX_IDE_BUS] = { 14, 15 };
+#endif
 
 /* PC hardware initialisation */
 static void pc_init1(MachineState *machine,
@@ -79,7 +81,9 @@ static void pc_init1(MachineState *machine,
     qemu_irq *i8259;
     qemu_irq smi_irq;
     GSIState *gsi_state;
+#ifdef CONFIG_IDE_PIIX
     DriveInfo *hd[MAX_IDE_BUS * MAX_IDE_DEVS];
+#endif
     BusState *idebus[MAX_IDE_BUS];
     ISADevice *rtc_state;
     MemoryRegion *ram_memory;
@@ -241,6 +245,7 @@ static void pc_init1(MachineState *machine,
 
     pc_nic_init(pcmc, isa_bus, pci_bus);
 
+#ifdef CONFIG_IDE_PIIX
     ide_drive_get(hd, ARRAY_SIZE(hd));
     if (pcmc->pci_enabled) {
         PCIDevice *dev;
@@ -267,6 +272,9 @@ static void pc_init1(MachineState *machine,
         }
     }
 
+#else
+    idebus[0] = idebus[1] = NULL;
+#endif
     pc_cmos_init(pcms, idebus[0], idebus[1], rtc_state);
 
     if (pcmc->pci_enabled && machine_usb(machine)) {
@@ -429,7 +437,7 @@ static void pc_i440fx_2_12_machine_options(MachineClass *m)
 {
     pc_i440fx_machine_options(m);
     m->alias = "pc";
-    m->is_default = 1;
+    m->is_default = 0;
 }
 
 DEFINE_I440FX_MACHINE(v2_12, "pc-i440fx-2.12", NULL,

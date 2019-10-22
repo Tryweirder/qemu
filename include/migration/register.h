@@ -22,6 +22,10 @@ typedef struct SaveVMHandlers {
     int (*save_live_complete_postcopy)(QEMUFile *f, void *opaque);
     int (*save_live_complete_precopy)(QEMUFile *f, void *opaque);
 
+    /* Migration should move to the precopy completion stage:
+     * stop the guest and send the remaining data */
+    bool (*save_live_should_complete_precopy)(void *opaque);
+
     /* This runs both outside and inside the iothread lock.  */
     bool (*is_active)(void *opaque);
     bool (*has_postcopy)(void *opaque);

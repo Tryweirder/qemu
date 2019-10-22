@@ -215,6 +215,8 @@ int kvm_has_pit_state2(void);
 int kvm_has_many_ioeventfds(void);
 int kvm_has_gsi_routing(void);
 int kvm_has_intx_set_mask(void);
+bool kvm_has_tsc_scaling(void);
+int kvm_host_tsc_khz(CPUState *cs);
 
 int kvm_init_vcpu(CPUState *cpu);
 int kvm_cpu_exec(CPUState *cpu);
@@ -464,6 +466,8 @@ int kvm_vm_check_extension(KVMState *s, unsigned int extension);
 
 uint32_t kvm_arch_get_supported_cpuid(KVMState *env, uint32_t function,
                                       uint32_t index, int reg);
+uint32_t kvm_arch_get_supported_msr_feature(KVMState *s, uint32_t index);
+
 
 void kvm_set_sigmask_len(KVMState *s, unsigned int sigmask_len);
 

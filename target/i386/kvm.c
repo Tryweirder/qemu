@@ -92,7 +92,9 @@ static bool has_msr_hv_stimer;
 static bool has_msr_hv_frequencies;
 static bool has_msr_xss;
 static bool has_msr_spec_ctrl;
+static bool has_msr_virt_ssbd;
 static bool has_msr_smi_count;
+static bool has_msr_arch_capabs;
 
 static uint32_t has_architectural_pmu_version;
 static uint32_t num_architectural_pmu_gp_counters;
@@ -105,6 +107,7 @@ static int has_pit_state2;
 static bool has_msr_mcg_ext_ctl;
 
 static struct kvm_cpuid2 *cpuid_cache;
+static struct kvm_msr_list *kvm_feature_msrs;
 
 int kvm_has_pit_state2(void)
 {
@@ -365,6 +368,15 @@ uint32_t kvm_arch_get_supported_cpuid(KVMState *s, uint32_t function,
         if (!kvm_irqchip_in_kernel()) {
             ret &= ~CPUID_EXT_X2APIC;
         }
+
+        if (enable_cpu_pm) {
+            int disable_exits = kvm_check_extension(s,
+                                                    KVM_CAP_X86_DISABLE_EXITS);
+
+            if (disable_exits & KVM_X86_DISABLE_EXITS_MWAIT) {
+                ret |= CPUID_EXT_MONITOR;
+            }
+        }
     } else if (function == 6 && reg == R_EAX) {
         ret |= CPUID_6_EAX_ARAT; /* safe to allow because of emulated APIC */
     } else if (function == 7 && index == 0 && reg == R_EBX) {
@@ -396,6 +408,42 @@ uint32_t kvm_arch_get_supported_cpuid(KVMState *s, uint32_t function,
 
     return ret;
 }
+
+uint32_t kvm_arch_get_supported_msr_feature(KVMState *s, uint32_t index)
+{
+    struct {
+        struct kvm_msrs info;
+        struct kvm_msr_entry entries[1];
+    } msr_data;
+    uint32_t ret;
+
+    if (kvm_feature_msrs == NULL) { /* Host doesn't support feature MSRs */
+        return 0;
+    }
+
+    /* Check if requested MSR is supported feature MSR */
+    int i;
+    for (i = 0; i < kvm_feature_msrs->nmsrs; i++)
+        if (kvm_feature_msrs->indices[i] == index) {
+            break;
+        }
+    if (i == kvm_feature_msrs->nmsrs) {
+        return 0; /* if the feature MSR is not supported, simply return 0 */
+    }
+
+    msr_data.info.nmsrs = 1;
+    msr_data.entries[0].index = index;
+
+    ret = kvm_ioctl(s, KVM_GET_MSRS, &msr_data);
+    if (ret != 1) {
+        error_report("KVM get MSR (index=0x%x) feature failed, %s",
+            index, strerror(-ret));
+        exit(1);
+    }
+
+    return msr_data.entries[0].data;
+}
+
 
 typedef struct HWPoisonPage {
     ram_addr_t ram_addr;
@@ -571,7 +619,7 @@ static bool hyperv_hypercall_available(X86CPU *cpu)
            (cpu->hyperv_spinlock_attempts != HYPERV_SPINLOCK_NEVER_RETRY);
 }
 
-static bool hyperv_enabled(X86CPU *cpu)
+bool kvm_hyperv_enabled(X86CPU *cpu)
 {
     CPUState *cs = CPU(cpu);
     return kvm_check_extension(cs->kvm_state, KVM_CAP_HYPERV) > 0 &&
@@ -734,7 +782,6 @@ int kvm_arch_init_vcpu(CPUState *cs)
     uint32_t signature[3];
     int kvm_base = KVM_CPUID_SIGNATURE;
     int r;
-    Error *local_err = NULL;
 
     memset(&cpuid_data, 0, sizeof(cpuid_data));
 
@@ -760,7 +807,7 @@ int kvm_arch_init_vcpu(CPUState *cs)
     }
 
     /* Paravirtualization CPUIDs */
-    if (hyperv_enabled(cpu)) {
+    if (kvm_hyperv_enabled(cpu)) {
         c = &cpuid_data.entries[cpuid_i++];
         c->function = HV_CPUID_VENDOR_AND_MAX_FUNCTIONS;
         if (!cpu->hyperv_vendor_id) {
@@ -1041,24 +1088,6 @@ int kvm_arch_init_vcpu(CPUState *cs)
         has_msr_mcg_ext_ctl = has_msr_feature_control = true;
     }
 
-    if (!env->user_tsc_khz) {
-        if ((env->features[FEAT_8000_0007_EDX] & CPUID_APM_INVTSC) &&
-            invtsc_mig_blocker == NULL) {
-            /* for migration */
-            error_setg(&invtsc_mig_blocker,
-                       "State blocked by non-migratable CPU device"
-                       " (invtsc flag)");
-            r = migrate_add_blocker(invtsc_mig_blocker, &local_err);
-            if (local_err) {
-                error_report_err(local_err);
-                error_free(invtsc_mig_blocker);
-                goto fail;
-            }
-            /* for savevm */
-            vmstate_x86_cpu.unmigratable = 1;
-        }
-    }
-
     if (cpu->vmware_cpuid_freq
         /* Guests depend on 0x40000000 to detect this feature, so only expose
          * it if KVM exposes leaf 0x40000000. (Conflicts with Hyper-V) */
@@ -1131,6 +1160,47 @@ void kvm_arch_do_init_vcpu(X86CPU *cpu)
     if (env->mp_state == KVM_MP_STATE_UNINITIALIZED) {
         env->mp_state = KVM_MP_STATE_INIT_RECEIVED;
     }
+}
+
+static int kvm_get_supported_feature_msrs(KVMState *s)
+{
+    int ret = 0;
+
+    if (kvm_feature_msrs != NULL) {
+        return 0;
+    }
+
+    if (!kvm_check_extension(s, KVM_CAP_GET_MSR_FEATURES)) {
+        return 0;
+    }
+
+    struct kvm_msr_list msr_list;
+
+    msr_list.nmsrs = 0;
+    ret = kvm_ioctl(s, KVM_GET_MSR_FEATURE_INDEX_LIST, &msr_list);
+    if (ret < 0 && ret != -E2BIG) {
+        error_report("Fetch KVM feature MSR list failed: %s",
+            strerror(-ret));
+        return ret;
+    }
+
+    assert(msr_list.nmsrs > 0);
+    kvm_feature_msrs = (struct kvm_msr_list *) \
+        g_malloc0(sizeof(msr_list) +
+                 msr_list.nmsrs * sizeof(msr_list.indices[0]));
+
+    kvm_feature_msrs->nmsrs = msr_list.nmsrs;
+    ret = kvm_ioctl(s, KVM_GET_MSR_FEATURE_INDEX_LIST, kvm_feature_msrs);
+
+    if (ret < 0) {
+        error_report("Fetch KVM feature MSR list failed: %s",
+            strerror(-ret));
+        g_free(kvm_feature_msrs);
+        kvm_feature_msrs = NULL;
+        return ret;
+    }
+
+    return 0;
 }
 
 static int kvm_get_supported_msrs(KVMState *s)
@@ -1218,6 +1288,12 @@ static int kvm_get_supported_msrs(KVMState *s)
                 case MSR_IA32_SPEC_CTRL:
                     has_msr_spec_ctrl = true;
                     break;
+                case MSR_VIRT_SSBD:
+                    has_msr_virt_ssbd = true;
+                    break;
+                case MSR_IA32_ARCH_CAPABILITIES:
+                    has_msr_arch_capabs = true;
+                    break;
                 }
             }
         }
@@ -1286,6 +1362,8 @@ int kvm_arch_init(MachineState *ms, KVMState *s)
         return ret;
     }
 
+    kvm_get_supported_feature_msrs(s);
+
     uname(&utsname);
     lm_capable_kernel = strcmp(utsname.machine, "x86_64") == 0;
 
@@ -1339,6 +1417,29 @@ int kvm_arch_init(MachineState *ms, KVMState *s)
         smram_machine_done.notify = register_smram_listener;
         qemu_add_machine_init_done_notifier(&smram_machine_done);
     }
+
+    if (enable_cpu_pm) {
+        int disable_exits = kvm_check_extension(s, KVM_CAP_X86_DISABLE_EXITS);
+        int ret;
+
+/* Work around for kernel header with a typo. TODO: fix header and drop. */
+#if defined(KVM_X86_DISABLE_EXITS_HTL) && !defined(KVM_X86_DISABLE_EXITS_HLT)
+#define KVM_X86_DISABLE_EXITS_HLT KVM_X86_DISABLE_EXITS_HTL
+#endif
+        if (disable_exits) {
+            disable_exits &= (KVM_X86_DISABLE_EXITS_MWAIT |
+                              KVM_X86_DISABLE_EXITS_HLT |
+                              KVM_X86_DISABLE_EXITS_PAUSE);
+        }
+
+        ret = kvm_vm_enable_cap(s, KVM_CAP_X86_DISABLE_EXITS, 0,
+                                disable_exits);
+        if (ret < 0) {
+            error_report("kvm: guest stopping CPU not supported: %s",
+                         strerror(-ret));
+        }
+    }
+
     return 0;
 }
 
@@ -1706,6 +1807,10 @@ static int kvm_put_msrs(X86CPU *cpu, int level)
     if (has_msr_spec_ctrl) {
         kvm_msr_entry_add(cpu, MSR_IA32_SPEC_CTRL, env->spec_ctrl);
     }
+    if (has_msr_virt_ssbd) {
+        kvm_msr_entry_add(cpu, MSR_VIRT_SSBD, env->virt_ssbd);
+    }
+
 #ifdef TARGET_X86_64
     if (lm_capable_kernel) {
         kvm_msr_entry_add(cpu, MSR_CSTAR, env->cstar);
@@ -1714,6 +1819,12 @@ static int kvm_put_msrs(X86CPU *cpu, int level)
         kvm_msr_entry_add(cpu, MSR_LSTAR, env->lstar);
     }
 #endif
+
+    /* If host supports feature MSR, write down. */
+    if (has_msr_arch_capabs) {
+        kvm_msr_entry_add(cpu, MSR_IA32_ARCH_CAPABILITIES,
+                          env->features[FEAT_ARCH_CAPABILITIES]);
+    }
 
     /*
      * The following MSRs have side effects on the guest or are too heavy
@@ -2077,8 +2188,9 @@ static int kvm_get_msrs(X86CPU *cpu)
     if (has_msr_spec_ctrl) {
         kvm_msr_entry_add(cpu, MSR_IA32_SPEC_CTRL, 0);
     }
-
-
+    if (has_msr_virt_ssbd) {
+        kvm_msr_entry_add(cpu, MSR_VIRT_SSBD, 0);
+    }
     if (!env->tsc_valid) {
         kvm_msr_entry_add(cpu, MSR_IA32_TSC, 0);
         env->tsc_valid = !runstate_is_running();
@@ -2443,6 +2555,9 @@ static int kvm_get_msrs(X86CPU *cpu)
             break;
         case MSR_IA32_SPEC_CTRL:
             env->spec_ctrl = msrs[i].data;
+            break;
+        case MSR_VIRT_SSBD:
+            env->virt_ssbd = msrs[i].data;
             break;
         case MSR_IA32_RTIT_CTL:
             env->msr_rtit_ctrl = msrs[i].data;

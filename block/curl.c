@@ -180,8 +180,9 @@ static int curl_sock_cb(CURL *curl, curl_socket_t fd, int action,
     QLIST_FOREACH(socket, &state->sockets, next) {
         if (socket->fd == fd) {
             if (action == CURL_POLL_REMOVE) {
-                QLIST_REMOVE(socket, next);
-                g_free(socket);
+                /* Don't actually remove the socket, just mark the fd as invalid
+                 * and should be removed later by curl_clean_invalid_sockets. */
+                socket->fd = -1;
             }
             break;
         }
@@ -272,9 +273,12 @@ static size_t curl_read_cb(void *ptr, size_t size, size_t nmemb, void *opaque)
 
             acb->ret = 0;
             s->acb[i] = NULL;
-            qemu_mutex_unlock(&s->s->mutex);
-            aio_co_wake(acb->co);
-            qemu_mutex_lock(&s->s->mutex);
+
+            if (qemu_coroutine_self() != acb->co) {
+                qemu_mutex_unlock(&s->s->mutex);
+                aio_co_schedule(s->s->aio_context, acb->co);
+                qemu_mutex_lock(&s->s->mutex);
+            }
         }
     }
 
@@ -387,7 +391,7 @@ static void curl_multi_check_completion(BDRVCURLState *s)
                     acb->ret = -EIO;
                     state->acb[i] = NULL;
                     qemu_mutex_unlock(&s->mutex);
-                    aio_co_wake(acb->co);
+                    aio_co_schedule(s->aio_context, acb->co);
                     qemu_mutex_lock(&s->mutex);
                 }
             }
@@ -398,10 +402,23 @@ static void curl_multi_check_completion(BDRVCURLState *s)
     }
 }
 
+static void curl_clean_invalid_sockets(CURLState *s)
+{
+    CURLSocket *socket, *next_socket;
+
+    QLIST_FOREACH_SAFE(socket, &s->sockets, next, next_socket) {
+        if (socket->fd == -1) {
+            /* Socket was marked as invalid by curl_sock_cb. Remove it */
+            QLIST_REMOVE(socket, next);
+            g_free(socket);
+        }
+    }
+}
+
 /* Called with s->mutex held.  */
 static void curl_multi_do_locked(CURLState *s)
 {
-    CURLSocket *socket, *next_socket;
+    CURLSocket *socket;
     int running;
     int r;
 
@@ -409,13 +426,18 @@ static void curl_multi_do_locked(CURLState *s)
         return;
     }
 
-    /* Need to use _SAFE because curl_multi_socket_action() may trigger
-     * curl_sock_cb() which might modify this list */
-    QLIST_FOREACH_SAFE(socket, &s->sockets, next, next_socket) {
+    QLIST_FOREACH(socket, &s->sockets, next) {
         do {
+            if (socket->fd == -1) {
+                break;
+            }
             r = curl_multi_socket_action(s->s->multi, socket->fd, 0, &running);
         } while (r == CURLM_CALL_MULTI_PERFORM);
     }
+
+    /* Some sockets could have been closed by curl_sock_cb in the loop above.
+     * So we have to clean up them */
+    curl_clean_invalid_sockets(s);
 }
 
 static void curl_multi_do(void *arg)

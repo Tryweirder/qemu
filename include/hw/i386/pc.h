@@ -56,6 +56,8 @@ struct PCMachineState {
 
     /* RAM information (sizes, addresses, configuration): */
     ram_addr_t below_4g_mem_size, above_4g_mem_size;
+    bool zeropage_scan_enabled;
+    uint64_t zeropage_scan_timeout_ms;
 
     /* CPU and apic information: */
     bool apic_xrupt_override;
@@ -80,6 +82,8 @@ struct PCMachineState {
 #define PC_MACHINE_SMBUS            "smbus"
 #define PC_MACHINE_SATA             "sata"
 #define PC_MACHINE_PIT              "pit"
+#define PC_MACHINE_ZEROPAGE_SCAN    "zeropage-scan"
+#define PC_MACHINE_ZEROPAGE_SCAN_TIMEOUT_MS  "zeropage-scan-timeout-ms"
 
 /**
  * PCMachineClass:

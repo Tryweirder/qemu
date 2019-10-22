@@ -25,7 +25,7 @@ struct TestCase {
     const char *superio;
 };
 
-static const TestCase test_cases[] = {
+static TestCase test_cases[] = {
     { "i386", "pc", -1 },
     { "mips", "mips", 0x14000000, .bswap = true },
     { "mips", "malta", 0x10000000, .bswap = true },
@@ -271,6 +271,19 @@ static void test_endianness_combine(gconstpointer data)
     qtest_quit(global_qtest);
 }
 
+/* Check if requested machine type is actually supported.
+ * If it is supported then function simply returns it back.
+ * If it is not supported we ask qemu for default machine type and return that.
+ */
+static const char *get_supported_machine_type(const char *type)
+{
+    if (!qtest_is_supported_machine_type(type)) {
+        type = qtest_get_default_machine_type();
+    }
+
+    return type;
+}
+
 int main(int argc, char **argv)
 {
     const char *arch = qtest_get_arch();
@@ -283,6 +296,11 @@ int main(int argc, char **argv)
         if (strcmp(test_cases[i].arch, arch) != 0) {
             continue;
         }
+
+        test_cases[i].machine =
+            get_supported_machine_type(test_cases[i].machine);
+        g_assert(test_cases[i].machine);
+
         path = g_strdup_printf("endianness/%s",
                                test_cases[i].machine);
         qtest_add_data_func(path, &test_cases[i], test_endianness);

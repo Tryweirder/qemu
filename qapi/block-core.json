@@ -278,6 +278,7 @@
 #       2.6: 'luks' added
 #       2.8: 'replication' added, 'tftp' dropped
 #       2.9: 'archipelago' dropped
+#       2.12: 'pluggable' added
 #
 # @backing_file: the name of the backing file (for copy-on-write)
 #
@@ -453,33 +454,6 @@
   'data': {'*name': 'str', 'count': 'int', 'granularity': 'uint32',
            'status': 'DirtyBitmapStatus'} }
 
-##
-# @BlockLatencyHistogramInfo:
-#
-# Block latency histogram.
-#
-# @boundaries: list of interval boundary values in nanoseconds, all greater
-#              than zero and in ascending order.
-#              For example, the list [10, 50, 100] produces the following
-#              histogram intervals: [0, 10), [10, 50), [50, 100), [100, +inf).
-#
-# @bins: list of io request counts corresponding to histogram intervals.
-#        len(@bins) = len(@boundaries) + 1
-#        For the example above, @bins may be something like [3, 1, 5, 2],
-#        and corresponding histogram looks like:
-#
-#        5|           *
-#        4|           *
-#        3| *         *
-#        2| *         *    *
-#        1| *    *    *    *
-#         +------------------
-#             10   50   100
-#
-# Since: 2.12
-##
-{ 'struct': 'BlockLatencyHistogramInfo',
-  'data': {'boundaries': ['uint64'], 'bins': ['uint64'] } }
 
 ##
 # @x-block-latency-histogram-set:
@@ -492,7 +466,7 @@
 # @device: device name to set latency histogram for.
 #
 # @boundaries: list of interval boundary values (see description in
-#              BlockLatencyHistogramInfo definition). If specified, all
+#              LatencyHistogramInfo definition). If specified, all
 #              latency histograms are removed, and empty ones created for all
 #              io types with intervals corresponding to @boundaries (except for
 #              io types, for which specific boundaries are set through the
@@ -784,6 +758,15 @@
 # @flush_operations: The number of cache flush operations performed by the
 #                    device (since 0.15.0)
 #
+# @rd_in_flight_operations: The number of in flight read operations performed
+#                           by the device (since 2.12.0).
+#
+# @wr_in_flight_operations: The number of in flight write operations performed
+#                           by the device (since 2.12.0).
+#
+# @flush_in_flight_operations: The number of in flight cache flush operations performed
+#                              by the device (since 2.12.0).
+#
 # @flush_total_time_ns: Total time spend on cache flushes in nano-seconds
 #                       (since 0.15.0).
 #
@@ -833,17 +816,19 @@
 # @timed_stats: Statistics specific to the set of previously defined
 #               intervals of time (Since 2.5)
 #
-# @x_rd_latency_histogram: @BlockLatencyHistogramInfo. (Since 2.12)
+# @x_rd_latency_histogram: @LatencyHistogramInfo. (Since 2.12)
 #
-# @x_wr_latency_histogram: @BlockLatencyHistogramInfo. (Since 2.12)
+# @x_wr_latency_histogram: @LatencyHistogramInfo. (Since 2.12)
 #
-# @x_flush_latency_histogram: @BlockLatencyHistogramInfo. (Since 2.12)
+# @x_flush_latency_histogram: @LatencyHistogramInfo. (Since 2.12)
 #
 # Since: 0.14.0
 ##
 { 'struct': 'BlockDeviceStats',
   'data': {'rd_bytes': 'int', 'wr_bytes': 'int', 'rd_operations': 'int',
            'wr_operations': 'int', 'flush_operations': 'int',
+           'rd_in_flight_operations': 'int', 'wr_in_flight_operations': 'int',
+           'flush_in_flight_operations': 'int',
            'flush_total_time_ns': 'int', 'wr_total_time_ns': 'int',
            'rd_total_time_ns': 'int', 'wr_highest_offset': 'int',
            'rd_merged': 'int', 'wr_merged': 'int', '*idle_time_ns': 'int',
@@ -852,9 +837,9 @@
            'invalid_wr_operations': 'int', 'invalid_flush_operations': 'int',
            'account_invalid': 'bool', 'account_failed': 'bool',
            'timed_stats': ['BlockDeviceTimedStats'],
-           '*x_rd_latency_histogram': 'BlockLatencyHistogramInfo',
-           '*x_wr_latency_histogram': 'BlockLatencyHistogramInfo',
-           '*x_flush_latency_histogram': 'BlockLatencyHistogramInfo' } }
+           '*x_rd_latency_histogram': 'LatencyHistogramInfo',
+           '*x_wr_latency_histogram': 'LatencyHistogramInfo',
+           '*x_flush_latency_histogram': 'LatencyHistogramInfo' } }
 
 ##
 # @BlockStats:
@@ -2506,6 +2491,7 @@
 # @vxhs: Since 2.10
 # @throttle: Since 2.11
 # @nvme: Since 2.12
+# @pluggable: Since 2.12
 #
 # Since: 2.9
 ##
@@ -2515,7 +2501,8 @@
             'host_device', 'http', 'https', 'iscsi', 'luks', 'nbd', 'nfs',
             'null-aio', 'null-co', 'nvme', 'parallels', 'qcow', 'qcow2', 'qed',
             'quorum', 'raw', 'rbd', 'replication', 'sheepdog', 'ssh',
-            'throttle', 'vdi', 'vhdx', 'vmdk', 'vpc', 'vvfat', 'vxhs' ] }
+            'throttle', 'vdi', 'vhdx', 'vmdk', 'vpc', 'vvfat', 'vxhs',
+            'pluggable' ] }
 
 ##
 # @BlockdevOptionsFile:
@@ -2566,6 +2553,27 @@
 ##
 { 'struct': 'BlockdevOptionsNVMe',
   'data': { 'device': 'str', 'namespace': 'int' } }
+
+##
+# @BlockdevOptionsPluggable:
+#
+# Driver specific block device options for the pluggable driver.
+#
+# @impl_path:     path to implementation shared object
+# @impl_volume:   volume passed to implementation shared object
+# @impl_options:  options passed to implementation shared object
+# @impl_mount_token_path: path to a file that contains mount token for this volume
+#
+# Since: 2.12
+##
+{ 'struct': 'BlockdevOptionsPluggable',
+  'data':
+  { 'impl_path': 'str',
+    'impl_volume': 'str',
+    '*impl_options': 'str',
+    '*impl_mount_token_path': 'str'
+  }
+}
 
 ##
 # @BlockdevOptionsVVFAT:
@@ -3501,6 +3509,8 @@
 #                 specified explicitly.
 # @detect-zeroes: detect and optimize zero writes (Since 2.1)
 #                 (default: off)
+# @async:         don't wait for operation to complete, end of operation
+#                 will be reported by BLOCKDEV_ADDED event (Since 2.12)
 # @force-share:   force share all permission on added nodes.
 #                 Requires read-only=true. (Since 2.10)
 #
@@ -3515,6 +3525,7 @@
             '*cache': 'BlockdevCacheOptions',
             '*read-only': 'bool',
             '*force-share': 'bool',
+            '*async': 'bool',
             '*detect-zeroes': 'BlockdevDetectZeroesOptions' },
   'discriminator': 'driver',
   'data': {
@@ -3554,7 +3565,8 @@
       'vmdk':       'BlockdevOptionsGenericCOWFormat',
       'vpc':        'BlockdevOptionsGenericFormat',
       'vvfat':      'BlockdevOptionsVVFAT',
-      'vxhs':       'BlockdevOptionsVxHS'
+      'vxhs':       'BlockdevOptionsVxHS',
+      'pluggable':  'BlockdevOptionsPluggable'
   } }
 
 ##
@@ -3650,6 +3662,9 @@
 #
 # @node-name: Name of the graph node to delete.
 #
+# @async:     Don't wait for operation to complete, end of operation
+#             will be reported by BLOCKDEV_DELETED event (since 2.12)
+#
 # Since: 2.9
 #
 # Example:
@@ -3672,7 +3687,7 @@
 # <- { "return": {} }
 #
 ##
-{ 'command': 'blockdev-del', 'data': { 'node-name': 'str' } }
+{ 'command': 'blockdev-del', 'data': { 'node-name': 'str', '*async': 'bool' } }
 
 ##
 # @BlockdevCreateOptionsFile:
@@ -4081,7 +4096,8 @@
       'vmdk':           'BlockdevCreateNotSupported',
       'vpc':            'BlockdevCreateOptionsVpc',
       'vvfat':          'BlockdevCreateNotSupported',
-      'vxhs':           'BlockdevCreateNotSupported'
+      'vxhs':           'BlockdevCreateNotSupported',
+      'pluggable':      'BlockdevCreateNotSupported'
   } }
 
 ##

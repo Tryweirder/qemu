@@ -55,6 +55,7 @@
 #include "io/channel-buffer.h"
 #include "io/channel-file.h"
 #include "sysemu/replay.h"
+#include "qemu/bitmap.h"
 
 #ifndef ETH_P_RARP
 #define ETH_P_RARP 0x8035
@@ -183,7 +184,7 @@ void qemu_announce_self(void)
 /* savevm/loadvm support */
 
 static ssize_t block_writev_buffer(void *opaque, struct iovec *iov, int iovcnt,
-                                   int64_t pos)
+                                   int64_t pos, Error **errp)
 {
     int ret;
     QEMUIOVector qiov;
@@ -198,12 +199,12 @@ static ssize_t block_writev_buffer(void *opaque, struct iovec *iov, int iovcnt,
 }
 
 static ssize_t block_get_buffer(void *opaque, uint8_t *buf, int64_t pos,
-                                size_t size)
+                                size_t size, Error **errp)
 {
     return bdrv_load_vmstate(opaque, buf, pos, size);
 }
 
-static int bdrv_fclose(void *opaque)
+static int bdrv_fclose(void *opaque, Error **errp)
 {
     return bdrv_flush(opaque);
 }
@@ -308,6 +309,9 @@ typedef struct SaveState {
     uint32_t len;
     const char *name;
     uint32_t target_page_bits;
+    uint32_t caps_count;
+    MigrationCapability *capabilities;
+    QemuUUID uuid;
 } SaveState;
 
 static SaveState savevm_state = {
@@ -315,14 +319,51 @@ static SaveState savevm_state = {
     .global_section_id = 0,
 };
 
+static bool should_validate_capability(int capability)
+{
+    assert(capability >= 0 && capability < MIGRATION_CAPABILITY__MAX);
+    /* Validate only new capabilities to keep compatibility. */
+    switch (capability) {
+    case MIGRATION_CAPABILITY_X_IGNORE_SHARED:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static uint32_t get_validatable_capabilities_count(void)
+{
+    MigrationState *s = migrate_get_current();
+    uint32_t result = 0;
+    int i;
+    for (i = 0; i < MIGRATION_CAPABILITY__MAX; i++) {
+        if (should_validate_capability(i) && s->enabled_capabilities[i]) {
+            result++;
+        }
+    }
+    return result;
+}
+
 static int configuration_pre_save(void *opaque)
 {
     SaveState *state = opaque;
     const char *current_name = MACHINE_GET_CLASS(current_machine)->name;
+    MigrationState *s = migrate_get_current();
+    int i, j;
 
     state->len = strlen(current_name);
     state->name = current_name;
     state->target_page_bits = qemu_target_page_bits();
+
+    state->caps_count = get_validatable_capabilities_count();
+    state->capabilities = g_renew(MigrationCapability, state->capabilities,
+                                  state->caps_count);
+    for (i = j = 0; i < MIGRATION_CAPABILITY__MAX; i++) {
+        if (should_validate_capability(i) && s->enabled_capabilities[i]) {
+            state->capabilities[j++] = i;
+        }
+    }
+    state->uuid = qemu_uuid;
 
     return 0;
 }
@@ -337,6 +378,40 @@ static int configuration_pre_load(void *opaque)
      */
     state->target_page_bits = qemu_target_page_bits_min();
     return 0;
+}
+
+static bool configuration_validate_capabilities(SaveState *state)
+{
+    bool ret = true;
+    MigrationState *s = migrate_get_current();
+    unsigned long *source_caps_bm;
+    int i;
+
+    source_caps_bm = bitmap_new(MIGRATION_CAPABILITY__MAX);
+    for (i = 0; i < state->caps_count; i++) {
+        MigrationCapability capability = state->capabilities[i];
+        set_bit(capability, source_caps_bm);
+    }
+
+    for (i = 0; i < MIGRATION_CAPABILITY__MAX; i++) {
+        bool source_state, target_state;
+        if (!should_validate_capability(i)) {
+            continue;
+        }
+        source_state = test_bit(i, source_caps_bm);
+        target_state = s->enabled_capabilities[i];
+        if (source_state != target_state) {
+            error_report("Capability %s is %s, but received capability is %s",
+                         MigrationCapability_str(i),
+                         target_state ? "on" : "off",
+                         source_state ? "on" : "off");
+            ret = false;
+            /* Don't break here to report all failed capabilities */
+        }
+    }
+
+    g_free(source_caps_bm);
+    return ret;
 }
 
 static int configuration_post_load(void *opaque, int version_id)
@@ -356,8 +431,52 @@ static int configuration_post_load(void *opaque, int version_id)
         return -EINVAL;
     }
 
+    if (!configuration_validate_capabilities(state)) {
+        return -EINVAL;
+    }
+
     return 0;
 }
+
+static int get_capability(QEMUFile *f, void *pv, size_t size,
+                          VMStateField *field)
+{
+    MigrationCapability *capability = pv;
+    char capability_str[UINT8_MAX + 1];
+    uint8_t len;
+    int i;
+
+    len = qemu_get_byte(f);
+    qemu_get_buffer(f, (uint8_t *)capability_str, len);
+    capability_str[len] = '\0';
+    for (i = 0; i < MIGRATION_CAPABILITY__MAX; i++) {
+        if (!strcmp(MigrationCapability_str(i), capability_str)) {
+            *capability = i;
+            return 0;
+        }
+    }
+    error_report("Received unknown capability %s", capability_str);
+    return -EINVAL;
+}
+
+static int put_capability(QEMUFile *f, void *pv, size_t size,
+                          VMStateField *field, QJSON *vmdesc)
+{
+    MigrationCapability *capability = pv;
+    const char *capability_str = MigrationCapability_str(*capability);
+    size_t len = strlen(capability_str);
+    assert(len <= UINT8_MAX);
+
+    qemu_put_byte(f, len);
+    qemu_put_buffer(f, (uint8_t *)capability_str, len);
+    return 0;
+}
+
+static const VMStateInfo vmstate_info_capability = {
+    .name = "capability",
+    .get  = get_capability,
+    .put  = put_capability,
+};
 
 /* The target-page-bits subsection is present only if the
  * target page size is not the same as the default (ie the
@@ -372,6 +491,39 @@ static bool vmstate_target_page_bits_needed(void *opaque)
         > qemu_target_page_bits_min();
 }
 
+static bool vmstate_capabilites_needed(void *opaque)
+{
+    return get_validatable_capabilities_count() > 0;
+}
+
+static bool vmstate_uuid_needed(void *opaque)
+{
+    return qemu_uuid_set && migrate_validate_uuid();
+}
+
+static int vmstate_uuid_post_load(void *opaque, int version_id)
+{
+    SaveState *state = opaque;
+    char uuid_src[UUID_FMT_LEN + 1];
+    char uuid_dst[UUID_FMT_LEN + 1];
+
+    if (!qemu_uuid_set) {
+        /* It's warning because user might not know UUID in some cases,
+         * e.g. load an old snapshot */
+        qemu_uuid_unparse(&state->uuid, uuid_src);
+        error_report("UUID is received %s, but local uuid isn't set",
+                     uuid_src);
+        return 0;
+    }
+    if (!qemu_uuid_is_equal(&state->uuid, &qemu_uuid)) {
+        qemu_uuid_unparse(&state->uuid, uuid_src);
+        qemu_uuid_unparse(&qemu_uuid, uuid_dst);
+        error_report("UUID received is %s and local is %s", uuid_src, uuid_dst);
+        return -EINVAL;
+    }
+    return 0;
+}
+
 static const VMStateDescription vmstate_target_page_bits = {
     .name = "configuration/target-page-bits",
     .version_id = 1,
@@ -379,6 +531,32 @@ static const VMStateDescription vmstate_target_page_bits = {
     .needed = vmstate_target_page_bits_needed,
     .fields = (VMStateField[]) {
         VMSTATE_UINT32(target_page_bits, SaveState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static const VMStateDescription vmstate_capabilites = {
+    .name = "configuration/capabilities",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = vmstate_capabilites_needed,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT32_V(caps_count, SaveState, 1),
+        VMSTATE_VARRAY_UINT32_ALLOC(capabilities, SaveState, caps_count, 1,
+                                    vmstate_info_capability,
+                                    MigrationCapability),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static const VMStateDescription vmstate_uuid = {
+    .name = "configuration/uuid",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = vmstate_uuid_needed,
+    .post_load = vmstate_uuid_post_load,
+    .fields = (VMStateField[]) {
+        VMSTATE_UINT8_ARRAY_V(uuid.data, SaveState, sizeof(QemuUUID), 1),
         VMSTATE_END_OF_LIST()
     }
 };
@@ -396,6 +574,8 @@ static const VMStateDescription vmstate_configuration = {
     },
     .subsections = (const VMStateDescription*[]) {
         &vmstate_target_page_bits,
+        &vmstate_capabilites,
+        &vmstate_uuid,
         NULL
     }
 };
@@ -1113,6 +1293,18 @@ void qemu_savevm_state_complete_postcopy(QEMUFile *f)
 
     qemu_put_byte(f, QEMU_VM_EOF);
     qemu_fflush(f);
+}
+
+bool qemu_savevm_state_should_complete_precopy(void)
+{
+    SaveStateEntry *se;
+    QTAILQ_FOREACH(se, &savevm_state.handlers, entry) {
+        if (se->ops && se->ops->save_live_should_complete_precopy &&
+            se->ops->save_live_should_complete_precopy(se->opaque)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 int qemu_savevm_state_complete_precopy(QEMUFile *f, bool iterable_only,
@@ -2220,6 +2412,10 @@ int save_snapshot(const char *name, Error **errp)
     qemu_timeval tv;
     struct tm tm;
     AioContext *aio_context;
+
+    if (migration_is_blocked(errp)) {
+        return false;
+    }
 
     if (!replay_can_snapshot()) {
         error_report("Record/replay does not allow making snapshot "

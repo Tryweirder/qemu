@@ -420,11 +420,20 @@ static void test_ivshmem_server_irq(void)
 static void test_ivshmem_hotplug(void)
 {
     const char *arch = qtest_get_arch();
-    gchar *opts;
+    const char *mtype = qtest_get_default_machine_type();
+    g_assert(mtype);
 
-    qtest_start("");
+    bool is_q35 = (strcmp(mtype, "q35") == 0);
+    gchar *opts = g_strdup_printf("'shm': '%s', 'size': '1M', 'bus':'%s'",
+                                  tmpshm,
+                                  is_q35 ? "ioh.1" : "pci.0");
 
-    opts = g_strdup_printf("'shm': '%s', 'size': '1M'", tmpshm);
+    if (is_q35) {
+        qtest_start("-device ioh3420,multifunction=on,port=1,chassis=1,"
+                    "id=ioh.1");
+    } else {
+        qtest_start("");
+    }
 
     qpci_plug_device_test("ivshmem", "iv1", PCI_SLOT_HP, opts);
     if (strcmp(arch, "ppc64") != 0) {
@@ -433,6 +442,7 @@ static void test_ivshmem_hotplug(void)
 
     qtest_end();
     g_free(opts);
+    g_free((void *)mtype);
 }
 
 static void test_ivshmem_memdev(void)

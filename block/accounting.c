@@ -38,6 +38,9 @@ void block_acct_init(BlockAcctStats *stats)
     if (qtest_enabled()) {
         clock_type = QEMU_CLOCK_VIRTUAL;
     }
+
+    block_trace_init(&stats->trace_state);
+    block_trace_set_clock(&stats->trace_state, clock_type);
 }
 
 void block_acct_setup(BlockAcctStats *stats, bool account_invalid,
@@ -53,6 +56,8 @@ void block_acct_cleanup(BlockAcctStats *stats)
     QSLIST_FOREACH_SAFE(s, &stats->intervals, entries, next) {
         g_free(s);
     }
+
+    block_trace_cleanup(&stats->trace_state);
     qemu_mutex_destroy(&stats->lock);
 }
 
@@ -92,82 +97,20 @@ void block_acct_start(BlockAcctStats *stats, BlockAcctCookie *cookie,
     cookie->bytes = bytes;
     cookie->start_time_ns = qemu_clock_get_ns(clock_type);
     cookie->type = type;
-}
-
-/* block_latency_histogram_compare_func:
- * Compare @key with interval [@it[0], @it[1]).
- * Return: -1 if @key < @it[0]
- *          0 if @key in [@it[0], @it[1])
- *         +1 if @key >= @it[1]
- */
-static int block_latency_histogram_compare_func(const void *key, const void *it)
-{
-    uint64_t k = *(uint64_t *)key;
-    uint64_t a = ((uint64_t *)it)[0];
-    uint64_t b = ((uint64_t *)it)[1];
-
-    return k < a ? -1 : (k < b ? 0 : 1);
+    stats->nr_in_flight[cookie->type]++;
 }
 
 static void block_latency_histogram_account(BlockLatencyHistogram *hist,
                                             int64_t latency_ns)
 {
-    uint64_t *pos;
-
-    if (hist->bins == NULL) {
-        /* histogram disabled */
-        return;
-    }
-
-
-    if (latency_ns < hist->boundaries[0]) {
-        hist->bins[0]++;
-        return;
-    }
-
-    if (latency_ns >= hist->boundaries[hist->nbins - 2]) {
-        hist->bins[hist->nbins - 1]++;
-        return;
-    }
-
-    pos = bsearch(&latency_ns, hist->boundaries, hist->nbins - 2,
-                  sizeof(hist->boundaries[0]),
-                  block_latency_histogram_compare_func);
-    assert(pos != NULL);
-
-    hist->bins[pos - hist->boundaries + 1]++;
+    latency_histogram_account(hist, latency_ns);
 }
 
 int block_latency_histogram_set(BlockAcctStats *stats, enum BlockAcctType type,
                                 uint64List *boundaries)
 {
     BlockLatencyHistogram *hist = &stats->latency_histogram[type];
-    uint64List *entry;
-    uint64_t *ptr;
-    uint64_t prev = 0;
-    int new_nbins = 1;
-
-    for (entry = boundaries; entry; entry = entry->next) {
-        if (entry->value <= prev) {
-            return -EINVAL;
-        }
-        new_nbins++;
-        prev = entry->value;
-    }
-
-    hist->nbins = new_nbins;
-    g_free(hist->boundaries);
-    hist->boundaries = g_new(uint64_t, hist->nbins - 1);
-    for (entry = boundaries, ptr = hist->boundaries; entry;
-         entry = entry->next, ptr++)
-    {
-        *ptr = entry->value;
-    }
-
-    g_free(hist->bins);
-    hist->bins = g_new0(uint64_t, hist->nbins);
-
-    return 0;
+    return latency_histogram_set(hist, boundaries);
 }
 
 void block_latency_histograms_clear(BlockAcctStats *stats)
@@ -176,9 +119,7 @@ void block_latency_histograms_clear(BlockAcctStats *stats)
 
     for (i = 0; i < BLOCK_MAX_IOTYPE; i++) {
         BlockLatencyHistogram *hist = &stats->latency_histogram[i];
-        g_free(hist->bins);
-        g_free(hist->boundaries);
-        memset(hist, 0, sizeof(*hist));
+        latency_histogram_clear(hist);
     }
 }
 
@@ -197,6 +138,7 @@ static void block_account_one_io(BlockAcctStats *stats, BlockAcctCookie *cookie,
 
     qemu_mutex_lock(&stats->lock);
 
+    stats->nr_in_flight[cookie->type]--;
     if (failed) {
         stats->failed_ops[cookie->type]++;
     } else {
@@ -213,6 +155,25 @@ static void block_account_one_io(BlockAcctStats *stats, BlockAcctCookie *cookie,
 
         QSLIST_FOREACH(s, &stats->intervals, entries) {
             timed_average_account(&s->latency[cookie->type], latency_ns);
+        }
+    }
+
+    if (!failed) {
+        switch (cookie->type) {
+        case BLOCK_ACCT_READ:
+            block_trace_entry_end(&stats->trace_state, cookie->start_time_ns,
+                                BLOCK_TRACE_TYPE_READ, cookie->bytes);
+            break;
+        case BLOCK_ACCT_WRITE:
+            block_trace_entry_end(&stats->trace_state, cookie->start_time_ns,
+                                BLOCK_TRACE_TYPE_WRITE, cookie->bytes);
+            break;
+        case BLOCK_ACCT_FLUSH:
+            block_trace_entry_end(&stats->trace_state, cookie->start_time_ns,
+                                BLOCK_TRACE_TYPE_FLUSH, cookie->bytes);
+            break;
+        default:
+            break;
         }
     }
 

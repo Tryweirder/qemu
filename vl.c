@@ -28,11 +28,7 @@
 #include "qemu/cutils.h"
 #include "qemu/help_option.h"
 #include "qemu/uuid.h"
-
-#ifdef CONFIG_SECCOMP
-#include <sys/prctl.h>
 #include "sysemu/seccomp.h"
-#endif
 
 #ifdef CONFIG_SDL
 #if defined(__APPLE__) || defined(main)
@@ -145,6 +141,7 @@ ram_addr_t ram_size;
 const char *mem_path = NULL;
 int mem_prealloc = 0; /* force preallocation of physical target memory */
 bool enable_mlock = false;
+bool enable_cpu_pm = false;
 int nb_nics;
 NICInfo nd_table[MAX_NICS];
 int autostart;
@@ -185,6 +182,7 @@ bool boot_strict;
 uint8_t *boot_splash_filedata;
 size_t boot_splash_filedata_size;
 uint8_t qemu_extra_params_fw[2];
+bool ram_is_migration_incoming;
 
 int icount_align_option;
 
@@ -253,35 +251,6 @@ static QemuOptsList qemu_rtc_opts = {
             .type = QEMU_OPT_STRING,
         },{
             .name = "driftfix",
-            .type = QEMU_OPT_STRING,
-        },
-        { /* end of list */ }
-    },
-};
-
-static QemuOptsList qemu_sandbox_opts = {
-    .name = "sandbox",
-    .implied_opt_name = "enable",
-    .head = QTAILQ_HEAD_INITIALIZER(qemu_sandbox_opts.head),
-    .desc = {
-        {
-            .name = "enable",
-            .type = QEMU_OPT_BOOL,
-        },
-        {
-            .name = "obsolete",
-            .type = QEMU_OPT_STRING,
-        },
-        {
-            .name = "elevateprivileges",
-            .type = QEMU_OPT_STRING,
-        },
-        {
-            .name = "spawn",
-            .type = QEMU_OPT_STRING,
-        },
-        {
-            .name = "resourcecontrol",
             .type = QEMU_OPT_STRING,
         },
         { /* end of list */ }
@@ -417,6 +386,22 @@ static QemuOptsList qemu_realtime_opts = {
     .desc = {
         {
             .name = "mlock",
+            .type = QEMU_OPT_BOOL,
+        },
+        { /* end of list */ }
+    },
+};
+
+static QemuOptsList qemu_overcommit_opts = {
+    .name = "overcommit",
+    .head = QTAILQ_HEAD_INITIALIZER(qemu_overcommit_opts.head),
+    .desc = {
+        {
+            .name = "mem-lock",
+            .type = QEMU_OPT_BOOL,
+        },
+        {
+            .name = "cpu-pm",
             .type = QEMU_OPT_BOOL,
         },
         { /* end of list */ }
@@ -1041,88 +1026,6 @@ static int bt_parse(const char *opt)
 
     error_report("bad bluetooth parameter '%s'", opt);
     return 1;
-}
-
-static int parse_sandbox(void *opaque, QemuOpts *opts, Error **errp)
-{
-    if (qemu_opt_get_bool(opts, "enable", false)) {
-#ifdef CONFIG_SECCOMP
-        uint32_t seccomp_opts = QEMU_SECCOMP_SET_DEFAULT
-                | QEMU_SECCOMP_SET_OBSOLETE;
-        const char *value = NULL;
-
-        value = qemu_opt_get(opts, "obsolete");
-        if (value) {
-            if (g_str_equal(value, "allow")) {
-                seccomp_opts &= ~QEMU_SECCOMP_SET_OBSOLETE;
-            } else if (g_str_equal(value, "deny")) {
-                /* this is the default option, this if is here
-                 * to provide a little bit of consistency for
-                 * the command line */
-            } else {
-                error_report("invalid argument for obsolete");
-                return -1;
-            }
-        }
-
-        value = qemu_opt_get(opts, "elevateprivileges");
-        if (value) {
-            if (g_str_equal(value, "deny")) {
-                seccomp_opts |= QEMU_SECCOMP_SET_PRIVILEGED;
-            } else if (g_str_equal(value, "children")) {
-                seccomp_opts |= QEMU_SECCOMP_SET_PRIVILEGED;
-
-                /* calling prctl directly because we're
-                 * not sure if host has CAP_SYS_ADMIN set*/
-                if (prctl(PR_SET_NO_NEW_PRIVS, 1)) {
-                    error_report("failed to set no_new_privs "
-                                 "aborting");
-                    return -1;
-                }
-            } else if (g_str_equal(value, "allow")) {
-                /* default value */
-            } else {
-                error_report("invalid argument for elevateprivileges");
-                return -1;
-            }
-        }
-
-        value = qemu_opt_get(opts, "spawn");
-        if (value) {
-            if (g_str_equal(value, "deny")) {
-                seccomp_opts |= QEMU_SECCOMP_SET_SPAWN;
-            } else if (g_str_equal(value, "allow")) {
-                /* default value */
-            } else {
-                error_report("invalid argument for spawn");
-                return -1;
-            }
-        }
-
-        value = qemu_opt_get(opts, "resourcecontrol");
-        if (value) {
-            if (g_str_equal(value, "deny")) {
-                seccomp_opts |= QEMU_SECCOMP_SET_RESOURCECTL;
-            } else if (g_str_equal(value, "allow")) {
-                /* default value */
-            } else {
-                error_report("invalid argument for resourcecontrol");
-                return -1;
-            }
-        }
-
-        if (seccomp_start(seccomp_opts) < 0) {
-            error_report("failed to install seccomp syscall filter "
-                         "in the kernel");
-            return -1;
-        }
-#else
-        error_report("seccomp support is disabled");
-        return -1;
-#endif
-    }
-
-    return 0;
 }
 
 static int parse_name(void *opaque, QemuOpts *opts, Error **errp)
@@ -3093,11 +2996,11 @@ int main(int argc, char **argv, char **envp)
     qemu_add_opts(&qemu_mem_opts);
     qemu_add_opts(&qemu_smp_opts);
     qemu_add_opts(&qemu_boot_opts);
-    qemu_add_opts(&qemu_sandbox_opts);
     qemu_add_opts(&qemu_add_fd_opts);
     qemu_add_opts(&qemu_object_opts);
     qemu_add_opts(&qemu_tpmdev_opts);
     qemu_add_opts(&qemu_realtime_opts);
+    qemu_add_opts(&qemu_overcommit_opts);
     qemu_add_opts(&qemu_msg_opts);
     qemu_add_opts(&qemu_name_opts);
     qemu_add_opts(&qemu_numa_opts);
@@ -3913,6 +3816,7 @@ int main(int argc, char **argv, char **envp)
                     runstate_set(RUN_STATE_INMIGRATE);
                 }
                 incoming = optarg;
+                ram_is_migration_incoming = true;
                 break;
             case QEMU_OPTION_only_migratable:
                 /*
@@ -4006,11 +3910,30 @@ int main(int argc, char **argv, char **envp)
                 qtest_log = optarg;
                 break;
             case QEMU_OPTION_sandbox:
+#ifdef CONFIG_SECCOMP
                 opts = qemu_opts_parse_noisily(qemu_find_opts("sandbox"),
                                                optarg, true);
                 if (!opts) {
                     exit(1);
                 }
+#else
+                error_report("-sandbox support is not enabled "
+                             "in this QEMU binary");
+                exit(1);
+#endif
+                break;
+            case QEMU_OPTION_seccomp:
+#ifdef CONFIG_SECCOMP
+                opts = qemu_opts_parse_noisily(qemu_find_opts("seccomp"),
+                                               optarg, true);
+                if (!opts) {
+                    exit(1);
+                }
+#else
+                error_report("-seccomp support is not enabled "
+                             "in this QEMU binary");
+                exit(1);
+#endif
                 break;
             case QEMU_OPTION_add_fd:
 #ifndef _WIN32
@@ -4038,7 +3961,20 @@ int main(int argc, char **argv, char **envp)
                 if (!opts) {
                     exit(1);
                 }
-                enable_mlock = qemu_opt_get_bool(opts, "mlock", true);
+                /* Don't override the -overcommit option if set */
+                enable_mlock = enable_mlock ||
+                    qemu_opt_get_bool(opts, "mlock", true);
+                break;
+            case QEMU_OPTION_overcommit:
+                opts = qemu_opts_parse_noisily(qemu_find_opts("overcommit"),
+                                               optarg, false);
+                if (!opts) {
+                    exit(1);
+                }
+                /* Don't override the -realtime option if set */
+                enable_mlock = enable_mlock ||
+                    qemu_opt_get_bool(opts, "mem-lock", false);
+                enable_cpu_pm = qemu_opt_get_bool(opts, "cpu-pm", false);
                 break;
             case QEMU_OPTION_msg:
                 opts = qemu_opts_parse_noisily(qemu_find_opts("msg"), optarg,
@@ -4090,10 +4026,12 @@ int main(int argc, char **argv, char **envp)
         exit(1);
     }
 
-    if (qemu_opts_foreach(qemu_find_opts("sandbox"),
-                          parse_sandbox, NULL, NULL)) {
-        exit(1);
+#ifdef CONFIG_SECCOMP
+    olist = qemu_find_opts_err("sandbox", NULL);
+    if (olist) {
+        qemu_opts_foreach(olist, parse_sandbox, NULL, &error_fatal);
     }
+#endif
 
     if (qemu_opts_foreach(qemu_find_opts("name"),
                           parse_name, NULL, NULL)) {
@@ -4718,6 +4656,13 @@ int main(int argc, char **argv, char **envp)
         return 0;
     }
 
+#ifdef CONFIG_SECCOMP
+    olist = qemu_find_opts_err("seccomp", NULL);
+    if (olist) {
+        qemu_opts_foreach(olist, parse_seccomp, NULL, &error_fatal);
+    }
+#endif
+
     if (incoming) {
         Error *local_err = NULL;
         qemu_start_incoming_migration(incoming, &local_err);
@@ -4735,6 +4680,12 @@ int main(int argc, char **argv, char **envp)
 
     gdbserver_cleanup();
 
+    /*
+     * cleaning up the migration object cancels any existing migration
+     * try to do this early so that it also stops using devices.
+     */
+    migration_shutdown();
+
     /* No more vcpu or device emulation activity beyond this point */
     vm_shutdown();
 
@@ -4749,7 +4700,6 @@ int main(int argc, char **argv, char **envp)
     monitor_cleanup();
     qemu_chr_cleanup();
     user_creatable_cleanup();
-    migration_object_finalize();
     /* TODO: unref root container, check all devices are ok */
 
     return 0;

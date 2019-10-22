@@ -111,6 +111,7 @@ struct NBDClient {
 
     QTAILQ_ENTRY(NBDClient) next;
     int nb_requests;
+    int max_nbd_requests;
     bool closing;
 
     bool structured_reply;
@@ -1229,8 +1230,6 @@ static int nbd_receive_request(QIOChannel *ioc, NBDRequest *request,
     return 0;
 }
 
-#define MAX_NBD_REQUESTS 16
-
 void nbd_client_get(NBDClient *client)
 {
     client->refcount++;
@@ -1283,7 +1282,7 @@ static NBDRequestData *nbd_request_get(NBDClient *client)
 {
     NBDRequestData *req;
 
-    assert(client->nb_requests <= MAX_NBD_REQUESTS - 1);
+    assert(client->nb_requests <= client->max_nbd_requests - 1);
     client->nb_requests++;
 
     req = g_new0(NBDRequestData, 1);
@@ -2101,7 +2100,8 @@ disconnect:
 
 static void nbd_client_receive_next_request(NBDClient *client)
 {
-    if (!client->recv_coroutine && client->nb_requests < MAX_NBD_REQUESTS) {
+    if (!client->recv_coroutine &&
+        client->nb_requests < client->max_nbd_requests) {
         nbd_client_get(client);
         client->recv_coroutine = qemu_coroutine_create(nbd_trip, client);
         aio_co_schedule(client->exp->ctx, client->recv_coroutine);
@@ -2141,6 +2141,7 @@ void nbd_client_new(NBDExport *exp,
                     QIOChannelSocket *sioc,
                     QCryptoTLSCreds *tlscreds,
                     const char *tlsaclname,
+                    int max_nbd_requests,
                     void (*close_fn)(NBDClient *, bool))
 {
     NBDClient *client;
@@ -2158,6 +2159,8 @@ void nbd_client_new(NBDExport *exp,
     object_ref(OBJECT(client->sioc));
     client->ioc = QIO_CHANNEL(sioc);
     object_ref(OBJECT(client->ioc));
+    assert(max_nbd_requests > 0);
+    client->max_nbd_requests = max_nbd_requests;
     client->close_fn = close_fn;
 
     co = qemu_coroutine_create(nbd_co_client_start, client);

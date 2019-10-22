@@ -27,7 +27,9 @@
 
 #include "qemu/timed-average.h"
 #include "qemu/thread.h"
+#include "qemu/latency-histogram.h"
 #include "qapi/qapi-builtin-types.h"
+#include "block/block-trace.h"
 
 typedef struct BlockAcctTimedStats BlockAcctTimedStats;
 typedef struct BlockAcctStats BlockAcctStats;
@@ -46,40 +48,13 @@ struct BlockAcctTimedStats {
     QSLIST_ENTRY(BlockAcctTimedStats) entries;
 };
 
-typedef struct BlockLatencyHistogram {
-    /* The following histogram is represented like this:
-     *
-     * 5|           *
-     * 4|           *
-     * 3| *         *
-     * 2| *         *    *
-     * 1| *    *    *    *
-     *  +------------------
-     *      10   50   100
-     *
-     * BlockLatencyHistogram histogram = {
-     *     .nbins = 4,
-     *     .boundaries = {10, 50, 100},
-     *     .bins = {3, 1, 5, 2},
-     * };
-     *
-     * @boundaries array define histogram intervals as follows:
-     * [0, boundaries[0]), [boundaries[0], boundaries[1]), ...
-     * [boundaries[nbins-2], +inf)
-     *
-     * So, for example above, histogram intervals are:
-     * [0, 10), [10, 50), [50, 100), [100, +inf)
-     */
-    int nbins;
-    uint64_t *boundaries; /* @nbins-1 numbers here
-                             (all boundaries, except 0 and +inf) */
-    uint64_t *bins;
-} BlockLatencyHistogram;
+typedef LatencyHistogram BlockLatencyHistogram;
 
 struct BlockAcctStats {
     QemuMutex lock;
     uint64_t nr_bytes[BLOCK_MAX_IOTYPE];
     uint64_t nr_ops[BLOCK_MAX_IOTYPE];
+    uint64_t nr_in_flight[BLOCK_MAX_IOTYPE];
     uint64_t invalid_ops[BLOCK_MAX_IOTYPE];
     uint64_t failed_ops[BLOCK_MAX_IOTYPE];
     uint64_t total_time_ns[BLOCK_MAX_IOTYPE];
@@ -89,6 +64,7 @@ struct BlockAcctStats {
     bool account_invalid;
     bool account_failed;
     BlockLatencyHistogram latency_histogram[BLOCK_MAX_IOTYPE];
+    BlockTraceState trace_state;
 };
 
 typedef struct BlockAcctCookie {

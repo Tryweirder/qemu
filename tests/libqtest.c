@@ -32,6 +32,7 @@
 
 #define MAX_IRQ 256
 #define SOCKET_TIMEOUT 50
+#define SOCKET_MAX_FDS 16
 
 QTestState *global_qtest;
 
@@ -198,16 +199,17 @@ QTestState *qtest_init_without_qmp_handshake(bool use_oob,
     if (s->qemu_pid == 0) {
         setenv("QEMU_AUDIO_DRV", "none", true);
         command = g_strdup_printf("exec %s "
-                                  "-qtest unix:%s,nowait "
-                                  "-qtest-log %s "
-                                  "-chardev socket,path=%s,nowait,id=char0 "
-                                  "-mon chardev=char0,mode=control%s "
-                                  "-machine accel=qtest "
-                                  "-display none "
-                                  "%s", qemu_binary, socket_path,
-                                  getenv("QTEST_LOG") ? "/dev/fd/2" : "/dev/null",
-                                  qmp_socket_path, use_oob ? ",x-oob=on" : "",
-                                  extra_args ?: "");
+                      "-qtest unix:%s,nowait "
+                      "-qtest-log %s "
+                      "-chardev socket,path=%s,nowait,id=char0 "
+                      "-mon chardev=char0,mode=control%s "
+                      "-machine accel=qtest "
+                      "-display none "
+                      "-nodefaults "
+                      "%s", qemu_binary, socket_path,
+                      getenv("QTEST_LOG") ? "/dev/fd/2" : "/dev/null",
+                      qmp_socket_path, use_oob ? ",x-oob=on" : "",
+                      extra_args ?: "");
         execlp("/bin/sh", "sh", "-c", command, NULL);
         exit(1);
     }
@@ -248,6 +250,38 @@ QTestState *qtest_init(const char *extra_args)
     qtest_qmp_discard_response(s, "{ 'execute': 'qmp_capabilities' }");
 
     return s;
+}
+
+int qtest_try_negative_testing(const char *extra_args)
+{
+    int qemu_pid;
+    gchar *command;
+    const char *qemu_binary = qtest_qemu_binary();
+    int status;
+
+    qemu_pid = fork();
+    if (qemu_pid == 0) {
+        setenv("QEMU_AUDIO_DRV", "none", true);
+        command = g_strdup_printf("exec %s "
+                                  "-qtest-log %s "
+                                  "-machine accel=qtest "
+                                  "-display none "
+                                  "-nodefaults "
+                                  "%s", qemu_binary,
+                                  getenv("QTEST_LOG") ? "/dev/fd/2" : "/dev/null",
+                                  extra_args ?: "");
+        execlp("/bin/sh", "sh", "-c", command, NULL);
+        exit(1);
+    }
+
+    waitpid(qemu_pid, &status, 0);
+
+    return status;
+}
+
+int qtest_qemu_pid(QTestState *qtest)
+{
+    return qtest->qemu_pid;
 }
 
 QTestState *qtest_vstartf(const char *fmt, va_list ap)
@@ -322,6 +356,40 @@ static void GCC_FMT_ATTR(2, 3) qtest_sendf(QTestState *s, const char *fmt, ...)
     va_start(ap, fmt);
     socket_sendf(s->fd, fmt, ap);
     va_end(ap);
+}
+
+/* Sends a message and file descriptors to the socket.
+ * It's needed for qmp-commands like getfd/add-fd */
+static void socket_send_fds(int socket_fd, int *fds, size_t fds_num,
+                            const char *buf, size_t buf_size)
+{
+    ssize_t ret;
+    struct msghdr msg = { 0 };
+    char control[CMSG_SPACE(sizeof(int) * SOCKET_MAX_FDS)] = { 0 };
+    size_t fdsize = sizeof(int) * fds_num;
+    struct cmsghdr *cmsg;
+    struct iovec iov = { .iov_base = (char *)buf, .iov_len = buf_size };
+
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+
+    if (fds && fds_num > 0) {
+        g_assert_cmpuint(fds_num, <, SOCKET_MAX_FDS);
+
+        msg.msg_control = control;
+        msg.msg_controllen = CMSG_SPACE(fdsize);
+
+        cmsg = CMSG_FIRSTHDR(&msg);
+        cmsg->cmsg_len = CMSG_LEN(fdsize);
+        cmsg->cmsg_level = SOL_SOCKET;
+        cmsg->cmsg_type = SCM_RIGHTS;
+        memcpy(CMSG_DATA(cmsg), fds, fdsize);
+    }
+
+    do {
+        ret = sendmsg(socket_fd, &msg, 0);
+    } while (ret < 0 && errno == EINTR);
+    g_assert_cmpint(ret, >, 0);
 }
 
 static GString *qtest_recv_line(QTestState *s)
@@ -477,7 +545,8 @@ QDict *qtest_qmp_receive(QTestState *s)
  * in the case that they choose to discard all replies up until
  * a particular EVENT is received.
  */
-void qmp_fd_sendv(int fd, const char *fmt, va_list ap)
+void qmp_fd_send_fdsv(int fd, int *fds, size_t fds_num,
+                      const char *fmt, va_list ap)
 {
     va_list ap_copy;
     QObject *qobj;
@@ -514,12 +583,28 @@ void qmp_fd_sendv(int fd, const char *fmt, va_list ap)
         if (log) {
             fprintf(stderr, "%s", str);
         }
+
         /* Send QMP request */
-        socket_send(fd, str, qstring_get_length(qstr));
+        if (fds && fds_num > 0) {
+            socket_send_fds(fd, fds, fds_num, str, qstring_get_length(qstr));
+        } else {
+            socket_send(fd, str, qstring_get_length(qstr));
+        }
 
         QDECREF(qstr);
         qobject_decref(qobj);
     }
+}
+
+void qmp_fd_sendv(int fd, const char *fmt, va_list ap)
+{
+    qmp_fd_send_fdsv(fd, NULL, 0, fmt, ap);
+}
+
+void qtest_async_qmp_fdsv(QTestState *s, int *fds, size_t fds_num,
+                          const char *fmt, va_list ap)
+{
+    qmp_fd_send_fdsv(s->qmp_fd, fds, fds_num, fmt, ap);
 }
 
 void qtest_async_qmpv(QTestState *s, const char *fmt, va_list ap)
@@ -532,6 +617,15 @@ QDict *qmp_fdv(int fd, const char *fmt, va_list ap)
     qmp_fd_sendv(fd, fmt, ap);
 
     return qmp_fd_receive(fd);
+}
+
+QDict *qtest_qmp_fdsv(QTestState *s, int *fds, size_t fds_num,
+                      const char *fmt, va_list ap)
+{
+    qtest_async_qmp_fdsv(s, fds, fds_num, fmt, ap);
+
+    /* Receive reply */
+    return qtest_qmp_receive(s);
 }
 
 QDict *qtest_qmpv(QTestState *s, const char *fmt, va_list ap)
@@ -560,6 +654,18 @@ void qmp_fd_send(int fd, const char *fmt, ...)
     va_start(ap, fmt);
     qmp_fd_sendv(fd, fmt, ap);
     va_end(ap);
+}
+
+QDict *qtest_qmp_fds(QTestState *s, int *fds, size_t fds_num,
+                     const char *fmt, ...)
+{
+    va_list ap;
+    QDict *response;
+
+    va_start(ap, fmt);
+    response = qtest_qmp_fdsv(s, fds, fds_num, fmt, ap);
+    va_end(ap);
+    return response;
 }
 
 QDict *qtest_qmp(QTestState *s, const char *fmt, ...)
@@ -994,19 +1100,36 @@ bool qtest_big_endian(QTestState *s)
     return s->big_endian;
 }
 
-void qtest_cb_for_every_machine(void (*cb)(const char *machine))
+static QList *list_machine_types(void)
 {
-    QDict *response, *minfo;
+    QDict *response;
     QList *list;
-    const QListEntry *p;
-    QObject *qobj;
-    QString *qstr;
-    const char *mname;
 
     qtest_start("-machine none");
+
     response = qmp("{ 'execute': 'query-machines' }");
     g_assert(response);
     list = qdict_get_qlist(response, "return");
+    g_assert(list);
+
+    qtest_end();
+
+    QINCREF(list);
+    QDECREF(response);
+
+    /* Caller will need to QDECREF this */
+    return list;
+}
+
+void qtest_cb_for_every_machine(void (*cb)(const char *machine))
+{
+    QList *list;
+    QDict *minfo;
+    QObject *qobj;
+    QString *qstr;
+    const QListEntry *p;
+
+    list = list_machine_types();
     g_assert(list);
 
     for (p = qlist_first(list); p; p = qlist_next(p)) {
@@ -1016,12 +1139,108 @@ void qtest_cb_for_every_machine(void (*cb)(const char *machine))
         g_assert(qobj);
         qstr = qobject_to(QString, qobj);
         g_assert(qstr);
-        mname = qstring_get_str(qstr);
-        cb(mname);
+
+        cb(qstring_get_str(qstr));
     }
 
-    qtest_end();
+    QDECREF(list);
+}
+
+const char *qtest_get_default_machine_type(void)
+{
+    QList *list;
+    QDict *minfo;
+    QObject *qobj;
+    QString *qstr;
+    const QListEntry *p;
+    const char *res;
+
+    list = list_machine_types();
+    g_assert(list);
+
+    res = NULL;
+    for (p = qlist_first(list); p; p = qlist_next(p)) {
+        minfo = qobject_to(QDict, qlist_entry_obj(p));
+        g_assert(minfo);
+        if (qdict_haskey(minfo, "is-default")) {
+            qobj = qdict_get(minfo, "alias");
+            g_assert(qobj);
+            qstr = qobject_to(QString, qobj);
+            g_assert(qstr);
+            res = g_strdup(qstring_get_str(qstr));
+            break;
+        }
+    }
+
+    QDECREF(list);
+    return res;
+}
+
+bool qtest_is_supported_machine_type(const char *machine)
+{
+    QList *list = list_machine_types();
+    g_assert(list);
+
+    const QListEntry *p;
+    for (p = qlist_first(list); p; p = qlist_next(p)) {
+        QDict *minfo = qobject_to(QDict, qlist_entry_obj(p));
+        g_assert(minfo);
+        QObject *qobj = qdict_get(minfo, "name");
+        g_assert(qobj);
+        QString *qstr = qobject_to(QString, qobj);
+
+        if (strcmp(qstring_get_str(qstr), machine) == 0) {
+            QDECREF(list);
+            return true;
+        } else if (qdict_haskey(minfo, "alias")) {
+            qobj = qdict_get(minfo, "alias");
+            g_assert(qobj);
+            QString *qstr = qobject_to(QString, qobj);
+            if (strcmp(qstring_get_str(qstr), machine) == 0) {
+                QDECREF(list);
+                return true;
+            }
+        }
+    }
+
+    QDECREF(list);
+    return false;
+}
+
+/*
+ * Tell if this qemu supports a given device type
+ */
+bool qtest_is_device_supported(const char *typename)
+{
+    char *cmd;
+    QDict *response;
+    QDict *error;
+
+    qtest_start("-machine none");
+
+    /* Check for known device type by listing its properties */
+    cmd = g_strdup_printf("{'execute': 'device-list-properties',"
+                          " 'arguments': { 'typename': '%s' }}",
+                          typename);
+
+    response = qmp(cmd);
+    g_free(cmd);
+    g_assert(response);
+
+    if (!qdict_haskey(response, "error")) {
+        QDECREF(response);
+        qtest_end();
+        return true;
+    }
+
+    /* Only expect DeviceNotFound error class */
+    error = qobject_to(QDict, qdict_get(response, "error"));
+    g_assert(error);
+    g_assert_cmpstr(qdict_get_str(error, "class"), ==, "DeviceNotFound");
+
     QDECREF(response);
+    qtest_end();
+    return false;
 }
 
 /*

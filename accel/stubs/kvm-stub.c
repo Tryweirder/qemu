@@ -115,6 +115,16 @@ int kvm_memcrypt_encrypt_data(uint8_t *ptr, uint64_t len)
   return 1;
 }
 
+bool kvm_has_tsc_scaling(void)
+{
+    return false;
+}
+
+int kvm_host_tsc_khz(CPUState *cs)
+{
+    return 0;
+}
+
 #ifndef CONFIG_USER_ONLY
 int kvm_irqchip_add_msi_route(KVMState *s, int vector, PCIDevice *dev)
 {

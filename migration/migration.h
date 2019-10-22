@@ -210,6 +210,8 @@ bool migrate_release_ram(void);
 bool migrate_postcopy_ram(void);
 bool migrate_zero_blocks(void);
 bool migrate_dirty_bitmaps(void);
+bool migrate_ignore_shared(void);
+bool migrate_validate_uuid(void);
 
 bool migrate_auto_converge(void);
 bool migrate_use_multifd(void);
@@ -223,6 +225,7 @@ bool migrate_colo_enabled(void);
 
 bool migrate_use_block(void);
 bool migrate_use_block_incremental(void);
+int migrate_max_cpu_throttle(void);
 bool migrate_use_return_path(void);
 
 bool migrate_use_compression(void);
@@ -241,5 +244,10 @@ int migrate_send_rp_req_pages(MigrationIncomingState *mis, const char* rbname,
 
 void dirty_bitmap_mig_before_vm_start(void);
 void init_dirty_bitmap_incoming_migration(void);
+
+int foreach_not_ignored_block(RAMBlockIterFunc func, void *opaque);
+
+#define qemu_ram_foreach_block \
+  #warning "Use foreach_not_ignored_block in migration code"
 
 #endif

@@ -28,6 +28,7 @@
 
 typedef struct NetPacket NetPacket;
 typedef struct NetQueue NetQueue;
+typedef struct NetAcctCookie NetAcctCookie;
 
 typedef void (NetPacketSent) (NetClientState *sender, ssize_t ret);
 
@@ -52,7 +53,8 @@ void qemu_net_queue_append_iov(NetQueue *queue,
                                unsigned flags,
                                const struct iovec *iov,
                                int iovcnt,
-                               NetPacketSent *sent_cb);
+                               NetPacketSent *sent_cb,
+                               NetAcctCookie *acct);
 
 void qemu_del_net_queue(NetQueue *queue);
 

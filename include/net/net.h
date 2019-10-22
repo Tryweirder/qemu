@@ -4,6 +4,7 @@
 #include "qemu/queue.h"
 #include "qapi/qapi-types-net.h"
 #include "net/queue.h"
+#include "net/accounting.h"
 #include "migration/vmstate.h"
 
 #define MAC_FMT "%02X:%02X:%02X:%02X:%02X:%02X"
@@ -99,6 +100,7 @@ struct NetClientState {
     int vring_enable;
     int vnet_hdr_len;
     QTAILQ_HEAD(NetFilterHead, NetFilterState) filters;
+    NetAcctStats stats;
 };
 
 typedef struct NICState {

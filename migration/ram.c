@@ -153,11 +153,37 @@ out:
     return ret;
 }
 
+static bool ramblock_is_ignored(RAMBlock *block)
+{
+    return migrate_ignore_shared() && qemu_ram_is_shared(block);
+}
+
+/* Should be holding either ram_list.mutex, or the RCU lock. */
+#define RAMBLOCK_FOREACH_NOT_IGNORED(block)            \
+    RAMBLOCK_FOREACH(block)                            \
+        if (ramblock_is_ignored(block)) {} else
+
+int foreach_not_ignored_block(RAMBlockIterFunc func, void *opaque)
+{
+    RAMBlock *block;
+    int ret = 0;
+
+    rcu_read_lock();
+    RAMBLOCK_FOREACH_NOT_IGNORED(block) {
+        ret = func(block, opaque);
+        if (ret) {
+            break;
+        }
+    }
+    rcu_read_unlock();
+    return ret;
+}
+
 static void ramblock_recv_map_init(void)
 {
     RAMBlock *rb;
 
-    RAMBLOCK_FOREACH(rb) {
+    RAMBLOCK_FOREACH_NOT_IGNORED(rb) {
         assert(!rb->receivedmap);
         rb->receivedmap = bitmap_new(rb->max_length >> qemu_target_page_bits());
     }
@@ -213,6 +239,8 @@ struct RAMState {
     uint32_t last_version;
     /* We are in the first round */
     bool ram_bulk_stage;
+    /* Can't throttle any more, source should complete precopy */
+    bool should_complete_precopy;
     /* How many times we have dirty too many pages */
     int dirty_rate_high_cnt;
     /* these variables are used for bitmap sync */
@@ -641,18 +669,30 @@ static size_t save_page_header(RAMState *rs, QEMUFile *f,  RAMBlock *block,
  * able to complete migration. Some workloads dirty memory way too
  * fast and will not effectively converge, even with auto-converge.
  */
-static void mig_throttle_guest_down(void)
+static void mig_throttle_guest_down(RAMState *rs)
 {
     MigrationState *s = migrate_get_current();
-    uint64_t pct_initial = s->parameters.cpu_throttle_initial;
-    uint64_t pct_icrement = s->parameters.cpu_throttle_increment;
+    int pct_initial = s->parameters.cpu_throttle_initial;
+    int pct_increment = s->parameters.cpu_throttle_increment;
+    int pct_max = s->parameters.max_cpu_throttle;
+    int pct_new;
 
     /* We have not started throttling yet. Let's start it. */
     if (!cpu_throttle_active()) {
-        cpu_throttle_set(pct_initial);
+        pct_new = pct_initial;
     } else {
         /* Throttling already on, just increase the rate */
-        cpu_throttle_set(cpu_throttle_get_percentage() + pct_icrement);
+        pct_new = cpu_throttle_get_percentage() + pct_increment;
+    }
+    if (pct_new <= pct_max || !s->parameters.x_cpu_throttle_force_stop) {
+        pct_new = MIN(pct_new, pct_max);
+        cpu_throttle_set(pct_new);
+    } else {
+        rs->should_complete_precopy = true;
+        pct_new = 100;
+    }
+    if (migrate_use_events()) {
+        qapi_event_send_migration_throttle(pct_new, NULL);
     }
 }
 
@@ -780,6 +820,10 @@ unsigned long migration_bitmap_find_dirty(RAMState *rs, RAMBlock *rb,
     unsigned long *bitmap = rb->bmap;
     unsigned long next;
 
+    if (ramblock_is_ignored(rb)) {
+        return size;
+    }
+
     if (rs->ram_bulk_stage && start > 0) {
         next = start + 1;
     } else {
@@ -825,7 +869,7 @@ uint64_t ram_pagesize_summary(void)
     RAMBlock *block;
     uint64_t summary = 0;
 
-    RAMBLOCK_FOREACH(block) {
+    RAMBLOCK_FOREACH_NOT_IGNORED(block) {
         summary |= block->page_size;
     }
 
@@ -849,7 +893,7 @@ static void migration_bitmap_sync(RAMState *rs)
 
     qemu_mutex_lock(&rs->bitmap_mutex);
     rcu_read_lock();
-    RAMBLOCK_FOREACH(block) {
+    RAMBLOCK_FOREACH_NOT_IGNORED(block) {
         migration_bitmap_sync_range(rs, block, 0, block->used_length);
     }
     rcu_read_unlock();
@@ -881,7 +925,7 @@ static void migration_bitmap_sync(RAMState *rs)
                 (++rs->dirty_rate_high_cnt >= 2)) {
                     trace_migration_throttle();
                     rs->dirty_rate_high_cnt = 0;
-                    mig_throttle_guest_down();
+                    mig_throttle_guest_down(rs);
             }
         }
 
@@ -1499,6 +1543,11 @@ static int ram_save_host_page(RAMState *rs, PageSearchStatus *pss,
     size_t pagesize_bits =
         qemu_ram_pagesize(pss->block) >> TARGET_PAGE_BITS;
 
+    if (ramblock_is_ignored(pss->block)) {
+        error_report("block %s should not be migrated !", pss->block->idstr);
+        return 0;
+    }
+
     do {
         tmppages = ram_save_target_page(rs, pss, last_stage);
         if (tmppages < 0) {
@@ -1581,17 +1630,28 @@ void acct_update_position(QEMUFile *f, size_t size, bool zero)
     }
 }
 
-uint64_t ram_bytes_total(void)
+static uint64_t ram_bytes_total_common(bool count_ignored)
 {
     RAMBlock *block;
     uint64_t total = 0;
 
     rcu_read_lock();
-    RAMBLOCK_FOREACH(block) {
-        total += block->used_length;
+    if (count_ignored) {
+        RAMBLOCK_FOREACH(block) {
+            total += block->used_length;
+        }
+    } else {
+        RAMBLOCK_FOREACH_NOT_IGNORED(block) {
+            total += block->used_length;
+        }
     }
     rcu_read_unlock();
     return total;
+}
+
+uint64_t ram_bytes_total(void)
+{
+    return ram_bytes_total_common(false);
 }
 
 static void xbzrle_load_setup(void)
@@ -1642,7 +1702,7 @@ static void ram_save_cleanup(void *opaque)
      */
     memory_global_dirty_log_stop();
 
-    QLIST_FOREACH_RCU(block, &ram_list.blocks, next) {
+    RAMBLOCK_FOREACH_NOT_IGNORED(block) {
         g_free(block->bmap);
         block->bmap = NULL;
         g_free(block->unsentmap);
@@ -1661,6 +1721,7 @@ static void ram_state_reset(RAMState *rs)
     rs->last_page = 0;
     rs->last_version = ram_list.version;
     rs->ram_bulk_stage = true;
+    rs->should_complete_precopy = false;
 }
 
 #define MAX_WAIT 50 /* ms, half buffered_file limit */
@@ -1705,7 +1766,7 @@ void ram_postcopy_migrated_memory_release(MigrationState *ms)
 {
     struct RAMBlock *block;
 
-    RAMBLOCK_FOREACH(block) {
+    RAMBLOCK_FOREACH_NOT_IGNORED(block) {
         unsigned long *bitmap = block->bmap;
         unsigned long range = block->used_length >> TARGET_PAGE_BITS;
         unsigned long run_start = find_next_zero_bit(bitmap, range, 0);
@@ -1783,7 +1844,7 @@ static int postcopy_each_ram_send_discard(MigrationState *ms)
     struct RAMBlock *block;
     int ret;
 
-    RAMBLOCK_FOREACH(block) {
+    RAMBLOCK_FOREACH_NOT_IGNORED(block) {
         PostcopyDiscardState *pds =
             postcopy_discard_send_init(ms, block->idstr);
 
@@ -1991,7 +2052,7 @@ int ram_postcopy_send_discard_bitmap(MigrationState *ms)
     rs->last_sent_block = NULL;
     rs->last_page = 0;
 
-    QLIST_FOREACH_RCU(block, &ram_list.blocks, next) {
+    RAMBLOCK_FOREACH_NOT_IGNORED(block) {
         unsigned long pages = block->used_length >> TARGET_PAGE_BITS;
         unsigned long *bitmap = block->bmap;
         unsigned long *unsentmap = block->unsentmap;
@@ -2150,7 +2211,7 @@ static void ram_list_init_bitmaps(void)
 
     /* Skip setting bitmap if there is no RAM */
     if (ram_bytes_total()) {
-        QLIST_FOREACH_RCU(block, &ram_list.blocks, next) {
+        RAMBLOCK_FOREACH_NOT_IGNORED(block) {
             pages = block->max_length >> TARGET_PAGE_BITS;
             block->bmap = bitmap_new(pages);
             bitmap_set(block->bmap, 0, pages);
@@ -2224,7 +2285,7 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
 
     rcu_read_lock();
 
-    qemu_put_be64(f, ram_bytes_total() | RAM_SAVE_FLAG_MEM_SIZE);
+    qemu_put_be64(f, ram_bytes_total_common(true) | RAM_SAVE_FLAG_MEM_SIZE);
 
     RAMBLOCK_FOREACH(block) {
         qemu_put_byte(f, strlen(block->idstr));
@@ -2232,6 +2293,10 @@ static int ram_save_setup(QEMUFile *f, void *opaque)
         qemu_put_be64(f, block->used_length);
         if (migrate_postcopy_ram() && block->page_size != qemu_host_page_size) {
             qemu_put_be64(f, block->page_size);
+        }
+        if (migrate_ignore_shared()) {
+            qemu_put_be64(f, block->mr->addr);
+            qemu_put_byte(f, ramblock_is_ignored(block) ? 1 : 0);
         }
     }
 
@@ -2471,6 +2536,11 @@ static inline RAMBlock *ram_block_from_stream(QEMUFile *f, int flags)
         return NULL;
     }
 
+    if (ramblock_is_ignored(block)) {
+        error_report("block %s should not be migrated !", id);
+        return NULL;
+    }
+
     return block;
 }
 
@@ -2659,7 +2729,7 @@ static int ram_load_cleanup(void *opaque)
     xbzrle_load_cleanup();
     compress_threads_load_cleanup();
 
-    RAMBLOCK_FOREACH(rb) {
+    RAMBLOCK_FOREACH_NOT_IGNORED(rb) {
         g_free(rb->receivedmap);
         rb->receivedmap = NULL;
     }
@@ -2870,6 +2940,11 @@ static int ram_load(QEMUFile *f, void *opaque, int version_id)
      */
     rcu_read_lock();
 
+    ram_is_migration_incoming = false;
+    /* Now, we're sure that shared memory wasn't corrupted. Unprotect to load
+     * migration stream */
+    qemu_ram_unprotect_all();
+
     if (postcopy_running) {
         ret = ram_load_postcopy(f);
     }
@@ -2943,6 +3018,23 @@ static int ram_load(QEMUFile *f, void *opaque, int version_id)
                             ret = -EINVAL;
                         }
                     }
+                    if (migrate_ignore_shared()) {
+                        hwaddr addr = qemu_get_be64(f);
+                        bool ignored = qemu_get_byte(f);
+                        if (ignored != ramblock_is_ignored(block)) {
+                            error_report("RAM block %s should %s be migrated",
+                                         id, ignored ? "" : "not");
+                            ret = -EINVAL;
+                        }
+                        if (ramblock_is_ignored(block) &&
+                            block->mr->addr != addr) {
+                            error_report("Mismatched GPAs for block %s "
+                                         "%" PRId64 "!= %" PRId64,
+                                         id, (uint64_t)addr,
+                                         (uint64_t)block->mr->addr);
+                            ret = -EINVAL;
+                        }
+                    }
                     ram_control_load_hook(f, RAM_CONTROL_BLOCK_REG,
                                           block->idstr);
                 } else {
@@ -3010,11 +3102,19 @@ static bool ram_has_postcopy(void *opaque)
     return migrate_postcopy_ram();
 }
 
+static bool ram_should_complete_precopy(void *opaque)
+{
+    RAMState **temp = opaque;
+    RAMState *rs = *temp;
+    return rs->should_complete_precopy;
+}
+
 static SaveVMHandlers savevm_ram_handlers = {
     .save_setup = ram_save_setup,
     .save_live_iterate = ram_save_iterate,
     .save_live_complete_postcopy = ram_save_complete,
     .save_live_complete_precopy = ram_save_complete,
+    .save_live_should_complete_precopy = ram_should_complete_precopy,
     .has_postcopy = ram_has_postcopy,
     .save_live_pending = ram_save_pending,
     .load_state = ram_load,

@@ -14,6 +14,7 @@
 #define LIBQOS_PCI_H
 
 #include "libqtest.h"
+#include "qemu/queue.h"
 
 #define QPCI_PIO_LIMIT    0x10000
 
@@ -51,6 +52,13 @@ struct QPCIBus {
     QTestState *qts;
     uint16_t pio_alloc_ptr;
     uint64_t mmio_alloc_ptr, mmio_limit;
+
+    uint16_t id;
+    uint16_t total_subordinates;
+    uint16_t subordinate_bus_id;
+
+    QLIST_HEAD(, QPCIBus) children;
+    QLIST_ENTRY(QPCIBus) link;  /* Link to list of siblings on the same level */
 };
 
 struct QPCIBar {
@@ -112,4 +120,6 @@ QPCIBar qpci_legacy_iomap(QPCIDevice *dev, uint16_t addr);
 void qpci_plug_device_test(const char *driver, const char *id,
                            uint8_t slot, const char *opts);
 void qpci_unplug_acpi_device_test(const char *id, uint8_t slot);
+void qpci_unplug_acpi_device_bus_test(const char *id, uint8_t bus,
+                                      uint8_t slot);
 #endif

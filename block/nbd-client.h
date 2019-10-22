@@ -15,7 +15,7 @@
 #define logout(fmt, ...) ((void)0)
 #endif
 
-#define MAX_NBD_REQUESTS    16
+#define MAX_NBD_REQUESTS    NBD_DEFAULT_MAX_REQUESTS
 
 typedef struct {
     Coroutine *coroutine;

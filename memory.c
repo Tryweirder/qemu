@@ -1552,7 +1552,7 @@ void memory_region_init_ram_from_file(MemoryRegion *mr,
                                       const char *name,
                                       uint64_t size,
                                       uint64_t align,
-                                      bool share,
+                                      uint32_t ram_flags,
                                       const char *path,
                                       Error **errp)
 {
@@ -1561,7 +1561,7 @@ void memory_region_init_ram_from_file(MemoryRegion *mr,
     mr->terminates = true;
     mr->destructor = memory_region_destructor_ram;
     mr->align = align;
-    mr->ram_block = qemu_ram_alloc_from_file(size, mr, share, path, errp);
+    mr->ram_block = qemu_ram_alloc_from_file(size, mr, ram_flags, path, errp);
     mr->dirty_log_mask = tcg_enabled() ? (1 << DIRTY_MEMORY_CODE) : 0;
 }
 
@@ -1577,7 +1577,9 @@ void memory_region_init_ram_from_fd(MemoryRegion *mr,
     mr->ram = true;
     mr->terminates = true;
     mr->destructor = memory_region_destructor_ram;
-    mr->ram_block = qemu_ram_alloc_from_fd(size, mr, share, fd, errp);
+    mr->ram_block = qemu_ram_alloc_from_fd(size, mr,
+                                           share ? RAM_SHARED : 0,
+                                           fd, errp);
     mr->dirty_log_mask = tcg_enabled() ? (1 << DIRTY_MEMORY_CODE) : 0;
 }
 #endif
@@ -2713,7 +2715,7 @@ static void memory_region_do_invalidate_mmio_ptr(CPUState *cpu,
     /* Reset dirty so this doesn't happen later. */
     cpu_physical_memory_test_and_clear_dirty(offset, size, 1);
 
-    if (section.mr != mr) {
+    if (section.mr && (section.mr != mr)) {
         /* memory_region_find add a ref on section.mr */
         memory_region_unref(section.mr);
         if (MMIO_INTERFACE(section.mr->owner)) {

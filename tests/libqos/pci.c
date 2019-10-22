@@ -16,17 +16,25 @@
 #include "hw/pci/pci_regs.h"
 #include "qemu/host-utils.h"
 
-void qpci_device_foreach(QPCIBus *bus, int vendor_id, int device_id,
-                         void (*func)(QPCIDevice *dev, int devfn, void *data),
-                         void *data)
+static void qpci_do_device_foreach(
+    QPCIBus *bus,
+    int vendor_id,
+    int device_id,
+    bool recoursive,
+    void (*func)(QPCIDevice *dev, int devfn, void *data),
+    void *data)
 {
     int slot;
+
+    if (!func) {
+        return;
+    }
 
     for (slot = 0; slot < 32; slot++) {
         int fn;
 
         for (fn = 0; fn < 8; fn++) {
-            QPCIDevice *dev;
+            QPCIDevice *dev = NULL;
 
             dev = qpci_device_find(bus, QPCI_DEVFN(slot, fn));
             if (!dev) {
@@ -48,6 +56,21 @@ void qpci_device_foreach(QPCIBus *bus, int vendor_id, int device_id,
             func(dev, QPCI_DEVFN(slot, fn), data);
         }
     }
+
+    if (recoursive) {
+        QPCIBus *child = NULL;
+        QLIST_FOREACH(child, &bus->children, link) {
+            qpci_do_device_foreach(child, vendor_id, device_id, recoursive,
+                                   func, data);
+        }
+    }
+}
+
+void qpci_device_foreach(QPCIBus *bus, int vendor_id, int device_id,
+                         void (*func)(QPCIDevice *dev, int devfn, void *data),
+                         void *data)
+{
+    return qpci_do_device_foreach(bus, vendor_id, device_id, false, func, data);
 }
 
 QPCIDevice *qpci_device_find(QPCIBus *bus, int devfn)

@@ -48,9 +48,10 @@ static void test_uhci_hotplug(void)
 
 static void test_usb_storage_hotplug(void)
 {
-    qtest_qmp_device_add("usb-storage", "usbdev0", "'drive': 'drive0'");
-
-    qtest_qmp_device_del("usbdev0");
+    if (qtest_is_device_supported("usb-storage")) {
+        qtest_qmp_device_add("usb-storage", "usbdev0", "'drive': 'drive0'");
+        qtest_qmp_device_del("usbdev0");
+    }
 }
 
 int main(int argc, char **argv)

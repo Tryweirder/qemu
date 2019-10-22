@@ -47,6 +47,7 @@
 #include "sysemu/tpm_backend.h"
 #include "hw/timer/mc146818rtc_regs.h"
 #include "sysemu/numa.h"
+#include "hw/char/serial.h"
 
 /* Supported chipsets: */
 #include "hw/acpi/piix4.h"
@@ -736,10 +737,16 @@ static void crs_range_set_free(CrsRangeSet *range_set)
 
 static gint crs_range_compare(gconstpointer a, gconstpointer b)
 {
-     CrsRangeEntry *entry_a = *(CrsRangeEntry **)a;
-     CrsRangeEntry *entry_b = *(CrsRangeEntry **)b;
+    CrsRangeEntry *entry_a = *(CrsRangeEntry **)a;
+    CrsRangeEntry *entry_b = *(CrsRangeEntry **)b;
 
-     return (int64_t)entry_a->base - (int64_t)entry_b->base;
+    if (entry_a->base < entry_b->base) {
+        return -1;
+    } else if (entry_a->base > entry_b->base) {
+        return 1;
+    } else {
+        return 0;
+    }
 }
 
 /*
@@ -1203,15 +1210,27 @@ static Aml *build_com_device_aml(uint8_t uid)
     Aml *else_ctx;
     Aml *zero = aml_int(0);
     Aml *is_present = aml_local(0);
-    const char *enabled_field = "CAEN";
-    uint8_t irq = 4;
-    uint16_t io_port = 0x03F8;
+    const char *enabled_field = NULL;
+    uint8_t irq;
+    uint16_t io_port;
 
-    assert(uid == 1 || uid == 2);
-    if (uid == 2) {
+    assert(uid >= 1 && uid <= 4);
+    irq = isa_serial_irq[uid - 1];
+    switch (uid) {
+    case 1:
+        enabled_field = "CAEN";
+        io_port = 0x03F8;
+        break;
+    case 2:
         enabled_field = "CBEN";
-        irq = 3;
         io_port = 0x02F8;
+        break;
+    case 3:
+        io_port = 0x03E8;
+        break;
+    case 4:
+        io_port = 0x02E8;
+        break;
     }
 
     dev = aml_device("COM%d", uid);
@@ -1219,17 +1238,23 @@ static Aml *build_com_device_aml(uint8_t uid)
     aml_append(dev, aml_name_decl("_UID", aml_int(uid)));
 
     method = aml_method("_STA", 0, AML_NOTSERIALIZED);
-    aml_append(method, aml_store(aml_name("%s", enabled_field), is_present));
-    if_ctx = aml_if(aml_equal(is_present, zero));
-    {
-        aml_append(if_ctx, aml_return(aml_int(0x00)));
+    if (uid <= 2) {
+        aml_append(method, aml_store(aml_name("%s", enabled_field),
+                   is_present));
+        if_ctx = aml_if(aml_equal(is_present, zero));
+        {
+            aml_append(if_ctx, aml_return(aml_int(0x00)));
+        }
+        aml_append(method, if_ctx);
+        else_ctx = aml_else();
+        {
+            aml_append(else_ctx, aml_return(aml_int(0x0f)));
+        }
+        aml_append(method, else_ctx);
+    } else {
+        bool enabled = memory_region_present(get_system_io(), io_port);
+        aml_append(method, aml_return(aml_int(enabled ? 0x0f : 0x00)));
     }
-    aml_append(method, if_ctx);
-    else_ctx = aml_else();
-    {
-        aml_append(else_ctx, aml_return(aml_int(0x0f)));
-    }
-    aml_append(method, else_ctx);
     aml_append(dev, method);
 
     crs = aml_resource_template();
@@ -1257,6 +1282,8 @@ static void build_isa_devices_aml(Aml *table)
     aml_append(scope, build_lpt_device_aml());
     aml_append(scope, build_com_device_aml(1));
     aml_append(scope, build_com_device_aml(2));
+    aml_append(scope, build_com_device_aml(3));
+    aml_append(scope, build_com_device_aml(4));
 
     if (ambiguous) {
         error_report("Multiple ISA busses, unable to define IPMI ACPI data");
@@ -1887,10 +1914,13 @@ build_dsdt(GArray *table_data, BIOSLinker *linker,
             scope = aml_scope("\\_SB");
             dev = aml_device("PC%.02X", bus_num);
             aml_append(dev, aml_name_decl("_UID", aml_int(bus_num)));
-            aml_append(dev, aml_name_decl("_HID", aml_eisaid("PNP0A03")));
             aml_append(dev, aml_name_decl("_BBN", aml_int(bus_num)));
             if (pci_bus_is_express(bus)) {
+                aml_append(dev, aml_name_decl("_HID", aml_eisaid("PNP0A08")));
+                aml_append(dev, aml_name_decl("_CID", aml_eisaid("PNP0A03")));
                 aml_append(dev, build_q35_osc_method());
+            } else {
+                aml_append(dev, aml_name_decl("_HID", aml_eisaid("PNP0A03")));
             }
 
             if (numa_node != NUMA_NODE_UNASSIGNED) {

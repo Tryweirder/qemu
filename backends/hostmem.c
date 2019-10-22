@@ -18,6 +18,7 @@
 #include "qapi/visitor.h"
 #include "qemu/config-file.h"
 #include "qom/object_interfaces.h"
+#include "migration/misc.h"
 
 #ifdef CONFIG_NUMA
 #include <numaif.h>
@@ -271,6 +272,11 @@ host_memory_backend_memory_complete(UserCreatable *uc, Error **errp)
     void *ptr;
     uint64_t sz;
 
+    if (!migration_is_idle()) {
+        error_setg(errp, "Adding memory-backend isn't allowed while migrating");
+        goto out;
+    }
+
     if (bc->alloc) {
         bc->alloc(backend, &local_err);
         if (local_err) {
@@ -344,7 +350,8 @@ out:
 static bool
 host_memory_backend_can_be_deleted(UserCreatable *uc)
 {
-    if (host_memory_backend_is_mapped(MEMORY_BACKEND(uc))) {
+    if (host_memory_backend_is_mapped(MEMORY_BACKEND(uc)) ||
+        !migration_is_idle()) {
         return false;
     } else {
         return true;

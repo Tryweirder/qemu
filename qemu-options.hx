@@ -3326,6 +3326,30 @@ mlocking qemu and guest memory can be enabled via @option{mlock=on}
 (enabled by default).
 ETEXI
 
+DEF("overcommit", HAS_ARG, QEMU_OPTION_overcommit,
+    "--overcommit [mem-lock=on|off][cpu-pm=on|off]\n"
+    "                run qemu with overcommit hints\n"
+    "                mem-lock=on|off controls memory lock support (default: off)\n"
+    "                cpu-pm=on|off controls cpu power management (default: off)\n",
+    QEMU_ARCH_ALL)
+STEXI
+@item -overcommit mem-lock=on|off
+@item -overcommit cpu-pm=on|off
+@findex -overcommit
+Run qemu with hints about host resource overcommit. The default is
+to assume that host overcommits all resources.
+
+Locking qemu and guest memory can be enabled via @option{mem-lock=on} (disabled
+by default).  This works when host memory is not overcommitted and reduces the
+worst-case latency for guest.  This is equivalent to @option{realtime}.
+
+Guest ability to manage power state of host cpus (increasing latency for other
+processes on the same host cpu, but decreasing latency for guest) can be
+enabled via @option{cpu-pm=on} (disabled by default).  This works best when
+host CPU is not overcommitted. When used, host estimates of CPU cycle and power
+utilization will be incorrect, not taking into account guest idle time.
+ETEXI
+
 DEF("gdb", HAS_ARG, QEMU_OPTION_gdb, \
     "-gdb dev        wait for gdb connection on 'dev'\n", QEMU_ARCH_ALL)
 STEXI
@@ -3852,6 +3876,36 @@ Disable set*uid|gid system calls
 Disable *fork and execve
 @item resourcecontrol=@var{string}
 Disable process affinity and schedular priority
+@end table
+ETEXI
+
+DEF("seccomp", HAS_ARG, QEMU_OPTION_seccomp, \
+    "-seccomp on[,policy=allow|deny][,exception=<filename>][,denyaction=kill|log]\n" \
+    "                Enable seccomp mode 2 for the required list of system calls.\n" \
+    "                use 'policy' to set the default behavior for seccomp, in case\n" \
+    "                    of allow all systemcalls will be allowed except the calls\n" \
+    "                    from the list defined. In case of deny policy all the\n" \
+    "                    systemcalls will be blocked except the calls from the list.\n" \
+    "                    The default policy is deny.\n" \
+    "                use 'exception' to set the exception system call list for the\n" \
+    "                    default policy. If the exception list isn't set, then empty\n" \
+    "                    list will be used.\n" \
+    "                use 'denyaction' to set the default deny action for the syscall,\n" \
+    "                    the defaul action is to kill the process, another action to\n" \
+    "                    use is log\n",
+    QEMU_ARCH_ALL)
+STEXI
+@item -seccomp @var{arg}[,policy=@var{string}][,exception=@var{filename}][,denyaction=@var{string}]
+@findex -seccomp
+Enable Seccomp mode 2 system call filter for the required list. 'on' will enable syscall
+filtering and 'off' will disable it.  The default is 'off'.
+@table @option
+@item policy=@var{string}
+Define the default policy for system calls, the default is deny
+@item exception=@var{filename}
+Define the filename path with the exception system call list, the default is empty list
+@item denyaction=@var{string}
+Define the deny action for the blocked syscalls, the default action is kill
 @end table
 ETEXI
 

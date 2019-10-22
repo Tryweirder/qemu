@@ -73,7 +73,8 @@ size_t qemu_mempath_getpagesize(const char *mem_path)
     return getpagesize();
 }
 
-void *qemu_ram_mmap(int fd, size_t size, size_t align, bool shared)
+void *qemu_ram_mmap(int fd, size_t size, size_t align, bool shared,
+                    bool readonly)
 {
     /*
      * Note: this always allocates at least one extra page of virtual address
@@ -97,6 +98,7 @@ void *qemu_ram_mmap(int fd, size_t size, size_t align, bool shared)
 #endif
     size_t offset;
     void *ptr1;
+    int prots;
 
     if (ptr == MAP_FAILED) {
         return MAP_FAILED;
@@ -106,8 +108,9 @@ void *qemu_ram_mmap(int fd, size_t size, size_t align, bool shared)
     /* Always align to host page size */
     assert(align >= getpagesize());
 
+    prots = PROT_READ | (readonly ? 0 : PROT_WRITE);
     offset = QEMU_ALIGN_UP((uintptr_t)ptr, align) - (uintptr_t)ptr;
-    ptr1 = mmap(ptr + offset, size, PROT_READ | PROT_WRITE,
+    ptr1 = mmap(ptr + offset, size, prots,
                 MAP_FIXED |
                 (fd == -1 ? MAP_ANONYMOUS : 0) |
                 (shared ? MAP_SHARED : MAP_PRIVATE),

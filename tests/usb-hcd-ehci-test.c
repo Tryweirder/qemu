@@ -19,6 +19,7 @@ static struct qhc uhci1;
 static struct qhc uhci2;
 static struct qhc uhci3;
 static struct qhc ehci1;
+static bool usb_storage_supported;
 
 /* helpers */
 
@@ -74,8 +75,10 @@ static void pci_uhci_port_1(void)
 {
     g_assert(pcibus != NULL);
 
-    uhci_port_test(&uhci1, 0, UHCI_PORT_CCS); /* usb-tablet  */
-    uhci_port_test(&uhci1, 1, UHCI_PORT_CCS); /* usb-storage */
+    /* usb-tablet  */
+    uhci_port_test(&uhci1, 0, UHCI_PORT_CCS);
+    /* usb-storage */
+    uhci_port_test(&uhci1, 1, usb_storage_supported ? UHCI_PORT_CCS : 0);
     uhci_port_test(&uhci2, 0, 0);
     uhci_port_test(&uhci2, 1, 0);
     uhci_port_test(&uhci3, 0, 0);
@@ -113,21 +116,17 @@ static void pci_uhci_port_2(void)
 
 static void pci_ehci_port_2(void)
 {
-    static uint32_t expect[] = {
-        PORTSC_PPOWER | PORTSC_CONNECT, /* usb-tablet  */
-        PORTSC_PPOWER | PORTSC_CONNECT, /* usb-storage */
-        PORTSC_PPOWER,
-        PORTSC_PPOWER,
-        PORTSC_PPOWER,
-        PORTSC_PPOWER,
-    };
-    int i;
-
     g_assert(pcibus != NULL);
 
-    for (i = 0; i < 6; i++) {
-        ehci_port_test(&ehci1, i, expect[i]);
-    }
+    /* usb-tablet */
+    ehci_port_test(&ehci1, 0, PORTSC_PPOWER | PORTSC_CONNECT);
+    /* usb-storage */
+    ehci_port_test(&ehci1, 1, PORTSC_PPOWER |
+                              (usb_storage_supported ? PORTSC_CONNECT : 0));
+    ehci_port_test(&ehci1, 2, PORTSC_PPOWER);
+    ehci_port_test(&ehci1, 3, PORTSC_PPOWER);
+    ehci_port_test(&ehci1, 4, PORTSC_PPOWER);
+    ehci_port_test(&ehci1, 5, PORTSC_PPOWER);
 }
 
 static void pci_ehci_port_3_hotplug(void)
@@ -142,12 +141,30 @@ static void pci_ehci_port_hotplug(void)
     usb_test_hotplug("ich9-ehci-1", 3, pci_ehci_port_3_hotplug);
 }
 
+#define QEMU_CMDLINE_STR \
+    "-machine q35 -device ich9-usb-ehci1,bus=pcie.0,addr=1d.7," \
+    "multifunction=on,id=ich9-ehci-1 " \
+    "-device ich9-usb-uhci1,bus=pcie.0,addr=1d.0," \
+    "multifunction=on,masterbus=ich9-ehci-1.0,firstport=0 " \
+    "-device ich9-usb-uhci2,bus=pcie.0,addr=1d.1," \
+    "multifunction=on,masterbus=ich9-ehci-1.0,firstport=2 " \
+    "-device ich9-usb-uhci3,bus=pcie.0,addr=1d.2," \
+    "multifunction=on,masterbus=ich9-ehci-1.0,firstport=4 " \
+    "-device usb-tablet,bus=ich9-ehci-1.0,port=1,usb_version=1 "
+
+#define QEMU_CMDLINE_USB_STORAGE_STR \
+    QEMU_CMDLINE_STR \
+    "-drive if=none,id=usbcdrom,media=cdrom " \
+    "-device usb-storage,bus=ich9-ehci-1.0,port=2,drive=usbcdrom "
 
 int main(int argc, char **argv)
 {
     int ret;
 
     g_test_init(&argc, &argv, NULL);
+
+    /* Might be compiled out while other USB support in in place */
+    usb_storage_supported = qtest_is_device_supported("usb-storage");
 
     qtest_add_func("/ehci/pci/uhci-port-1", pci_uhci_port_1);
     qtest_add_func("/ehci/pci/ehci-port-1", pci_ehci_port_1);
@@ -156,17 +173,8 @@ int main(int argc, char **argv)
     qtest_add_func("/ehci/pci/ehci-port-2", pci_ehci_port_2);
     qtest_add_func("/ehci/pci/ehci-port-3-hotplug", pci_ehci_port_hotplug);
 
-    qtest_start("-machine q35 -device ich9-usb-ehci1,bus=pcie.0,addr=1d.7,"
-                "multifunction=on,id=ich9-ehci-1 "
-                "-device ich9-usb-uhci1,bus=pcie.0,addr=1d.0,"
-                "multifunction=on,masterbus=ich9-ehci-1.0,firstport=0 "
-                "-device ich9-usb-uhci2,bus=pcie.0,addr=1d.1,"
-                "multifunction=on,masterbus=ich9-ehci-1.0,firstport=2 "
-                "-device ich9-usb-uhci3,bus=pcie.0,addr=1d.2,"
-                "multifunction=on,masterbus=ich9-ehci-1.0,firstport=4 "
-                "-drive if=none,id=usbcdrom,media=cdrom "
-                "-device usb-tablet,bus=ich9-ehci-1.0,port=1,usb_version=1 "
-                "-device usb-storage,bus=ich9-ehci-1.0,port=2,drive=usbcdrom ");
+    qtest_start(usb_storage_supported ?
+                QEMU_CMDLINE_USB_STORAGE_STR : QEMU_CMDLINE_STR);
 
     test_init();
     ret = g_test_run();

@@ -27,6 +27,8 @@ block-obj-y += write-threshold.o
 block-obj-y += backup.o
 block-obj-$(CONFIG_REPLICATION) += replication.o
 block-obj-y += throttle.o
+block-obj-$(CONFIG_BLOCK_PLUGINS) += pluggable-format.o blockstore-plugin.o
+block-obj-y += block-trace.o
 
 block-obj-y += crypto.o
 

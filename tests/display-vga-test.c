@@ -40,13 +40,11 @@ static void pci_virtio_gpu(void)
     qtest_end();
 }
 
-#ifdef CONFIG_VIRTIO_VGA
 static void pci_virtio_vga(void)
 {
     qtest_start("-vga none -device virtio-vga");
     qtest_end();
 }
-#endif
 
 int main(int argc, char **argv)
 {
@@ -56,14 +54,25 @@ int main(int argc, char **argv)
 
     if (strcmp(arch, "alpha") == 0 || strcmp(arch, "i386") == 0 ||
         strcmp(arch, "mips") == 0 || strcmp(arch, "x86_64") == 0) {
-        qtest_add_func("/display/pci/cirrus", pci_cirrus);
+
+        if (qtest_is_device_supported("cirrus-vga")) {
+            qtest_add_func("/display/pci/cirrus", pci_cirrus);
+        }
     }
+
+    /* stdvga and secondary vga are enabled by CONFIG_VGA which is
+     * used in tests/Makefile.include to ignore this test completely */
     qtest_add_func("/display/pci/stdvga", pci_stdvga);
     qtest_add_func("/display/pci/secondary", pci_secondary);
     qtest_add_func("/display/pci/multihead", pci_multihead);
-    qtest_add_func("/display/pci/virtio-gpu", pci_virtio_gpu);
-#ifdef CONFIG_VIRTIO_VGA
-    qtest_add_func("/display/pci/virtio-vga", pci_virtio_vga);
-#endif
+
+    if (qtest_is_device_supported("virtio-gpu-pci")) {
+        qtest_add_func("/display/pci/virtio-gpu", pci_virtio_gpu);
+    }
+
+    if (qtest_is_device_supported("virtio-vga")) {
+        qtest_add_func("/display/pci/virtio-vga", pci_virtio_vga);
+    }
+
     return g_test_run();
 }

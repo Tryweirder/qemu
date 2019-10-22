@@ -52,6 +52,7 @@
 #define QEMU_NBD_OPT_TLSCREDS      261
 #define QEMU_NBD_OPT_IMAGE_OPTS    262
 #define QEMU_NBD_OPT_FORK          263
+#define QEMU_NBD_OPT_MAX_REQUESTS  264
 
 #define MBR_SIZE 512
 
@@ -66,6 +67,7 @@ static int shared = 1;
 static int nb_fds;
 static QIONetListener *server;
 static QCryptoTLSCreds *tlscreds;
+static int max_nbd_requests = NBD_DEFAULT_MAX_REQUESTS;
 
 static void usage(const char *name)
 {
@@ -355,7 +357,7 @@ static void nbd_accept(QIONetListener *listener, QIOChannelSocket *cioc,
     nb_fds++;
     nbd_update_server_watch();
     nbd_client_new(newproto ? NULL : exp, cioc,
-                   tlscreds, NULL, nbd_client_closed);
+                   tlscreds, NULL, max_nbd_requests, nbd_client_closed);
 }
 
 static void nbd_update_server_watch(void)
@@ -527,6 +529,7 @@ int main(int argc, char **argv)
         { "image-opts", no_argument, NULL, QEMU_NBD_OPT_IMAGE_OPTS },
         { "trace", required_argument, NULL, 'T' },
         { "fork", no_argument, NULL, QEMU_NBD_OPT_FORK },
+        { "max-requests", required_argument, NULL, QEMU_NBD_OPT_MAX_REQUESTS },
         { NULL, 0, NULL, 0 }
     };
     int ch;
@@ -751,6 +754,17 @@ int main(int argc, char **argv)
             break;
         case QEMU_NBD_OPT_FORK:
             fork_process = true;
+            break;
+        case QEMU_NBD_OPT_MAX_REQUESTS:
+            max_nbd_requests = strtol(optarg, &end, 0);
+            if (*end) {
+                error_report("Invalid max nbd requests number '%s'", optarg);
+                exit(EXIT_FAILURE);
+            }
+            if (max_nbd_requests < 1) {
+                error_report("Max nbd requests number must be greater than 0");
+                exit(EXIT_FAILURE);
+            }
             break;
         }
     }

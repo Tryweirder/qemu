@@ -31,6 +31,7 @@
 #include "qapi/qapi-commands-block-core.h"
 #include "qapi/qobject-output-visitor.h"
 #include "qapi/qapi-visit-block-core.h"
+#include "qapi/qapi-commands-yc.h"
 #include "qapi/qmp/qbool.h"
 #include "qapi/qmp/qdict.h"
 #include "qapi/qmp/qlist.h"
@@ -394,35 +395,12 @@ static void bdrv_query_info(BlockBackend *blk, BlockInfo **p_info,
     qapi_free_BlockInfo(info);
 }
 
-static uint64List *uint64_list(uint64_t *list, int size)
-{
-    int i;
-    uint64List *out_list = NULL;
-    uint64List **pout_list = &out_list;
-
-    for (i = 0; i < size; i++) {
-        uint64List *entry = g_new(uint64List, 1);
-        entry->value = list[i];
-        *pout_list = entry;
-        pout_list = &entry->next;
-    }
-
-    *pout_list = NULL;
-
-    return out_list;
-}
-
 static void bdrv_latency_histogram_stats(BlockLatencyHistogram *hist,
                                          bool *not_null,
-                                         BlockLatencyHistogramInfo **info)
+                                         LatencyHistogramInfo **info)
 {
-    *not_null = hist->bins != NULL;
-    if (*not_null) {
-        *info = g_new0(BlockLatencyHistogramInfo, 1);
-
-        (*info)->boundaries = uint64_list(hist->boundaries, hist->nbins - 1);
-        (*info)->bins = uint64_list(hist->bins, hist->nbins);
-    }
+    *info = latency_histogram_info(hist);
+    *not_null = (*info != NULL);
 }
 
 static void bdrv_query_blk_stats(BlockDeviceStats *ds, BlockBackend *blk)
@@ -450,6 +428,10 @@ static void bdrv_query_blk_stats(BlockDeviceStats *ds, BlockBackend *blk)
     ds->wr_total_time_ns = stats->total_time_ns[BLOCK_ACCT_WRITE];
     ds->rd_total_time_ns = stats->total_time_ns[BLOCK_ACCT_READ];
     ds->flush_total_time_ns = stats->total_time_ns[BLOCK_ACCT_FLUSH];
+
+    ds->rd_in_flight_operations = stats->nr_in_flight[BLOCK_ACCT_READ];
+    ds->wr_in_flight_operations = stats->nr_in_flight[BLOCK_ACCT_WRITE];
+    ds->flush_in_flight_operations = stats->nr_in_flight[BLOCK_ACCT_FLUSH];
 
     ds->has_idle_time_ns = stats->last_access_time_ns > 0;
     if (ds->has_idle_time_ns) {
@@ -593,10 +575,14 @@ BlockStatsList *qmp_query_blockstats(bool has_query_nodes,
             p_next = &info->next;
         }
     } else {
-        for (blk = blk_next(NULL); blk; blk = blk_next(blk)) {
+        for (blk = blk_all_next(NULL); blk; blk = blk_all_next(blk)) {
             BlockStatsList *info = g_malloc0(sizeof(*info));
             AioContext *ctx = blk_get_aio_context(blk);
             BlockStats *s;
+
+            if (!*blk_name(blk) && !blk_get_attached_dev(blk)) {
+                continue;
+            }
 
             aio_context_acquire(ctx);
             s = bdrv_query_bds_stats(blk_bs(blk), true);
@@ -612,6 +598,49 @@ BlockStatsList *qmp_query_blockstats(bool has_query_nodes,
     }
 
     return head;
+}
+
+static BlockTraceState *get_blk_trace(const char *device, Error **errp)
+{
+    BlockAcctStats *stats;
+    BlockBackend *blk = blk_lookup(device);
+
+    if (!blk) {
+        error_setg(errp, "Device '%s' not found", device);
+        return NULL;
+    }
+
+    stats = blk_get_stats(blk);
+    return &stats->trace_state;
+}
+
+void qmp_start_block_trace(const char *device, uint32_t latency, Error **errp)
+{
+    BlockTraceState *ts = get_blk_trace(device, errp);
+    if (ts) {
+        block_trace_start(ts, latency, errp);
+    }
+}
+
+BlockTraceInfoList *qmp_stop_block_trace(const char *device, Error **errp)
+{
+    BlockTraceState *ts = get_blk_trace(device, errp);
+    return ts ? block_trace_stop(ts, errp) : NULL;
+}
+
+BlockDeviceStats *qmp_query_device_blockstats(const char *device, Error **errp)
+{
+    BlockDeviceStats *ds;
+    BlockBackend *blk = blk_lookup(device);
+
+    if (!blk) {
+        error_setg(errp, "Device '%s' not found", device);
+        return NULL;
+    }
+
+    ds = g_new0(BlockDeviceStats, 1);
+    bdrv_query_blk_stats(ds, blk);
+    return ds;
 }
 
 #define NB_SUFFIXES 4
