@@ -82,6 +82,17 @@ enum {
 static char g_afl_buf[AFL_BUF_LEN];
 static int g_qtest_sigpipe;
 
+static void
+proxy_test_usage(const char *app)
+{
+    printf("Usage: %s -q qtest_sock [-t file_name] [-a afl_sock]\n\n", app);
+
+    printf("\t-h        this screen\n");
+    printf("\t-q        path to the qtest socket, waiting for connection\n");
+    printf("\t-t        file_name to use as a test\n");
+    printf("\t-a        AFL socket path to communicate\n");
+}
+
 static int
 parse_arguments(int argc, char *argv[])
 {
@@ -89,7 +100,7 @@ parse_arguments(int argc, char *argv[])
 
     memset(&g_test_proxy_opt, 0, sizeof(g_test_proxy_opt));
     g_test_proxy_opt.mode = PROXY_MODE_MAX;
-    while ((opt = getopt(argc, argv, "a:q:t:")) != -1) {
+    while ((opt = getopt(argc, argv, "a:q:t:h")) != -1) {
         switch (opt) {
         case 't':
             strncpy(g_test_proxy_opt.file_name, optarg,
@@ -103,18 +114,24 @@ parse_arguments(int argc, char *argv[])
             strncpy(g_test_proxy_opt.qtest_sock_path, optarg,
                     FILENAME_PATH_MAX - 1);
             break;
+        case 'h':
+            proxy_test_usage(argv[0]);
+            return 0;
         default:
             printf("Parse error\n");
+            proxy_test_usage(argv[0]);
             return EINVAL;
         }
     }
 
     if (!strlen(g_test_proxy_opt.qtest_sock_path)) {
         printf("The qtest unix socket should be defined.\n");
+        proxy_test_usage(argv[0]);
         return EINVAL;
     }
     if (strlen(g_test_proxy_opt.file_name) && strlen(g_test_proxy_opt.afl_sock_path)) {
         printf("Use only one option explicitely: -a or -t.\n");
+        proxy_test_usage(argv[0]);
         return EINVAL;
     }
     if (strlen(g_test_proxy_opt.file_name)) {
@@ -127,6 +144,7 @@ parse_arguments(int argc, char *argv[])
 
     if (g_test_proxy_opt.mode >= PROXY_MODE_MAX) {
         printf("Can't set the proper proxy mode.\n");
+        proxy_test_usage(argv[0]);
         return EINVAL;
     }
 
