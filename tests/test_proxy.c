@@ -419,7 +419,29 @@ close_file:
 }
 
 static int
-handle_io(int qtest_srv, int afl_fd, struct test_proxy_opt_s *opt)
+test_proxy_handle_file(int qtest_srv, char *file_name)
+{
+    int qtest_fd;
+    struct qtest_vqdev_s qtest_vqdev;
+
+    qtest_fd = accept(qtest_srv, NULL, NULL);
+    if (qtest_fd == -1) {
+        printf("Can't accept qtest connection: %d, %s.\n",
+                errno, strerror(errno));
+        return errno;
+    }
+
+    memset(&qtest_vqdev, 0, sizeof(qtest_vqdev));
+    qos_state_init(&qtest_vqdev, qtest_fd, -1);
+
+    virtio_send_file(file_name, &qtest_vqdev);
+    qos_state_cleanup(&qtest_vqdev);
+
+    return 0;
+}
+
+static int
+test_proxy_handle_afl(int qtest_srv, int afl_fd)
 {
     int qtest_fd;
     int epoll_fd;
@@ -471,12 +493,6 @@ handle_io(int qtest_srv, int afl_fd, struct test_proxy_opt_s *opt)
 
                 memset(&qtest_vqdev, 0, sizeof(qtest_vqdev));
                 qos_state_init(&qtest_vqdev, qtest_fd, -1);
-
-                if (opt->mode == PROXY_MODE_FILE) {
-                    virtio_send_file(opt->file_name, &qtest_vqdev);
-                    qos_state_cleanup(&qtest_vqdev);
-                    return 0;
-                }
 
                 ev.events = EPOLLIN | EPOLLERR | EPOLLHUP | EPOLLRDHUP;
                 ev.data.fd = qtest_fd;
@@ -590,7 +606,11 @@ main(int argc, char *argv[])
     }
 
     signal(SIGPIPE, handle_sigpipe);
-    handle_io(qtest_srv, afl_fd, &g_test_proxy_opt);
+    if (g_test_proxy_opt.mode == PROXY_MODE_AFL) {
+        test_proxy_handle_afl(qtest_srv, afl_fd);
+    } else if (g_test_proxy_opt.mode == PROXY_MODE_FILE) {
+        test_proxy_handle_file(qtest_srv, g_test_proxy_opt.file_name);
+    }
 
     return 0;
 }
